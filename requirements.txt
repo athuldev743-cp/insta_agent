@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+google-genai
+edge-tts
+ffmpeg-python
+cloudinary
+requests
+python-dotenv
+apscheduler
