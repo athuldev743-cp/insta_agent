@@ -14,32 +14,48 @@ import atexit
 from engine import run_engine
 from social import post_reel_full_pipeline
 from token_manager import auto_refresh_if_needed
-from config import AGENT_CONFIG  # ← import from config
+from config import AGENT_CONFIG
 
 load_dotenv()
 
 app = FastAPI(title="Instagram AI Agent", version="1.0.0")
 
 scheduler   = BackgroundScheduler(timezone="Asia/Kolkata")
-THEMES      = AGENT_CONFIG["themes"]     # ← from config (30 themes)
+THEMES      = AGENT_CONFIG["themes"]
 theme_index = 0
 
 
-def run_post_cycle():
+# ── CORE POST CYCLE ───────────────────────────────────────────
+async def run_post_cycle():
+    """Async post cycle — used by FastAPI background tasks"""
     global theme_index
     theme       = THEMES[theme_index % len(THEMES)]
     theme_index += 1
-    print(f"\n[AGENT] 🚀 Starting cycle → Theme: {theme}")
+    print(f"\n[AGENT] 🚀 Starting cycle → Theme: {theme}", flush=True)
 
     try:
-        result  = asyncio.run(run_engine(theme))
+        print("[AGENT] Step 1: Running engine...", flush=True)
+        result = await run_engine(theme)
+        print(f"[AGENT] Step 2: Engine done. Posting to Instagram...", flush=True)
         post_id = post_reel_full_pipeline(
             video_path=result['video_path'],
             caption=result['caption']
         )
-        print(f"[AGENT] ✅ Posted! ID: {post_id}")
+        print(f"[AGENT] ✅ Posted! ID: {post_id}", flush=True)
     except Exception as e:
-        print(f"[AGENT] ❌ Failed: {e}")
+        import traceback
+        print(f"[AGENT] ❌ Failed: {e}", flush=True)
+        traceback.print_exc()
+
+
+def run_post_cycle_sync():
+    """Sync wrapper for APScheduler — creates its own event loop"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(run_post_cycle())
+    finally:
+        loop.close()
 
 
 def keep_alive_ping():
@@ -47,11 +63,12 @@ def keep_alive_ping():
     try:
         app_url = os.getenv("RENDER_APP_URL", "http://localhost:8000")
         req.get(f"{app_url}/health", timeout=10)
-        print("[AGENT] 💓 Keep-alive ping sent")
+        print("[AGENT] 💓 Keep-alive ping sent", flush=True)
     except Exception as e:
-        print(f"[AGENT] ⚠️  Keep-alive ping failed: {e}")
+        print(f"[AGENT] ⚠️  Keep-alive failed: {e}", flush=True)
 
 
+# ── STARTUP ───────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
     auto_refresh_if_needed()
@@ -59,29 +76,30 @@ async def startup():
     post_times = AGENT_CONFIG["post_times"]
     tz         = AGENT_CONFIG["timezone"]
 
-    # Add post jobs from config
+    # Schedule post jobs from config
     for pt in post_times:
         scheduler.add_job(
-            run_post_cycle,
+            run_post_cycle_sync,              # sync wrapper for APScheduler
             CronTrigger(hour=pt["hour"], minute=pt["minute"], timezone=tz),
             id=pt["label"],
             name=f"Post at {pt['hour']:02d}:{pt['minute']:02d}"
         )
-        print(f"[AGENT] ✅ Scheduled: {pt['label']} at {pt['hour']:02d}:{pt['minute']:02d} {tz}")
+        print(f"[AGENT] ✅ Scheduled: {pt['label']} at {pt['hour']:02d}:{pt['minute']:02d} {tz}", flush=True)
 
-    # Keep-alive ping every 14 minutes (prevents Render sleep)
+    # Keep-alive every 14 minutes
     scheduler.add_job(
         keep_alive_ping,
-        CronTrigger(minute="*/14"),   # every 14 minutes
+        CronTrigger(minute="*/14"),
         id="keep_alive",
         name="Keep Alive Ping"
     )
 
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown())
-    print(f"[AGENT] ✅ Agent live — {len(THEMES)} themes loaded")
+    print(f"[AGENT] ✅ Agent live — {len(THEMES)} themes loaded", flush=True)
 
 
+# ── ROUTES ────────────────────────────────────────────────────
 @app.get("/")
 def root():
     return {"status": "running", "agent": "Instagram AI Agent - Web Dev"}
@@ -105,8 +123,37 @@ def health():
 
 @app.post("/post-now")
 async def post_now(background_tasks: BackgroundTasks, theme: str = "HTML basics"):
+    """Trigger a post in background — non-blocking"""
     background_tasks.add_task(run_post_cycle)
     return {"status": "started", "theme": theme}
+
+
+@app.get("/post-debug")
+async def post_debug(theme: str = "HTML basics for beginners"):
+    """Runs synchronously — shows exact errors in browser AND Render logs"""
+    global theme_index
+    print(f"[DEBUG] Starting debug post: {theme}", flush=True)
+    try:
+        print("[DEBUG] Step 1: Engine...", flush=True)
+        result = await run_engine(theme)
+        print(f"[DEBUG] Step 2: Caption: {result['caption']}", flush=True)
+
+        print("[DEBUG] Step 3: Posting...", flush=True)
+        post_id = post_reel_full_pipeline(
+            video_path=result['video_path'],
+            caption=result['caption']
+        )
+        print(f"[DEBUG] ✅ Done! Post ID: {post_id}", flush=True)
+        return {
+            "status":  "success",
+            "post_id": post_id,
+            "caption": result['caption']
+        }
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[DEBUG] ❌ Error:\n{tb}", flush=True)
+        raise HTTPException(status_code=500, detail=tb)
 
 
 @app.get("/schedule-status")
@@ -129,6 +176,7 @@ def schedule_status():
 
 @app.get("/test-engine")
 async def test_engine(theme: str = "HTML basics for beginners"):
+    """Test AI generation without posting to Instagram"""
     try:
         result = await run_engine(theme)
         return {
