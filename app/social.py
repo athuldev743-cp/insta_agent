@@ -84,8 +84,8 @@ def publish_reel(container_id: str) -> str:
 
 
 def cleanup_temp_files():
-    """Remove local temp files after successful post"""
-    for filename in ['temp_image.jpg', 'temp_audio.mp3', 'reel.mp4']:
+    for filename in ['slide_1.jpg', 'slide_2.jpg', 'slide_3.jpg',
+                     'temp_audio.mp3', 'reel.mp4']:
         path = os.path.join(DATA_DIR, filename)
         if os.path.exists(path):
             os.remove(path)

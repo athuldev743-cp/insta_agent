@@ -1,9 +1,10 @@
 fastapi
 uvicorn
-google-genai
+openai
 edge-tts
 ffmpeg-python
 cloudinary
 requests
 python-dotenv
 apscheduler
+huggingface_hub Pillow

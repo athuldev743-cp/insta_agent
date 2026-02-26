@@ -110,26 +110,26 @@ AGENT_CONFIG = {
 
     # ── IMAGE STYLE ───────────────────────────────────
     "image_style": {
-        "aesthetic": "clean, modern, developer-themed dark mode",
-        "colors": "dark background (#0d1117), purple and blue accents, white text elements",
-        "mood": "focused, professional, inspiring for coders",
-        "elements": (
-            "code snippets, terminal windows, browser mockups, "
-            "dark IDE themes, subtle grid patterns, glowing text"
-        )
-    },
+    "aesthetic": "ultra clean dark mode code editor, professional developer workspace",
+    "colors": "pure black background, electric blue syntax highlighting, white clean text, subtle purple accents",
+    "mood": "focused, professional, modern developer aesthetic",
+    "elements": (
+        "clean readable code snippet centered on screen, "
+        "VS Code dark theme interface, "
+        "single focused concept shown in code, "
+        "subtle grid lines, minimal design, "
+        "no clutter, no people, no logos"
+    )
+},
 
     # ── VOICEOVER STYLE ───────────────────────────────
-    "voice": {
-        "tts_voice": "en-US-AriaNeural",
-        # Alternatives:
-        # "en-US-GuyNeural"       — American male
-        # "en-IN-NeerjaNeural"    — Indian female
-        # "en-IN-PrabhatNeural"   — Indian male
-        "script_style": (
-            "Clear, friendly tech teacher — like a YouTube tutorial "
-            "intro. Simple words, one key concept per reel."
-        ),
-        "script_length": "15 seconds when spoken (about 35-40 words)"
-    }
+   "voice": {
+    "tts_voice": "en-US-AriaNeural",
+    "script_style": (
+        "Friendly coding teacher explaining one concept clearly. "
+        "Like a YouTube tutorial — warm, simple, encouraging. "
+        "Uses short sentences. Pauses naturally."
+    ),
+    "script_length": "25-30 seconds when spoken (about 60-70 words)"  # ← increased
+},
 }
