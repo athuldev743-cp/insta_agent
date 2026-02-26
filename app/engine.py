@@ -105,33 +105,68 @@ def _generate_single_image(slide_prompt: str, filename: str) -> str:
 
     raise ValueError(f"All providers failed for {filename}: {last_error}")
 
-
 async def generate_slideshow_images(theme: str, count: int = 3) -> list:
-    """Generate multiple images — each slide a different visual angle"""
+    """Generate multiple images — each slide unique and different"""
     print(f"[ENGINE] Generating {count} slideshow images...")
 
     img_style = AGENT_CONFIG["image_style"]
 
+    # Random style variations to ensure unique images every time
+    color_schemes = [
+        "deep purple and cyan on black background",
+        "electric blue and white on dark background",
+        "green matrix style on pure black",
+        "orange and yellow gradient on dark background",
+        "red and pink neon on dark background",
+        "gold and white on deep navy background",
+    ]
+
+    visual_styles = [
+        "minimalist and clean",
+        "cyberpunk and futuristic",
+        "neon glow effect",
+        "holographic and glossy",
+        "retro terminal style",
+        "modern flat design",
+    ]
+
+    compositions = [
+        "centered composition",
+        "rule of thirds layout",
+        "diagonal dynamic layout",
+        "symmetrical composition",
+        "top-heavy layout",
+    ]
+
+    # Pick random variations for THIS post
+    color   = random.choice(color_schemes)
+    style   = random.choice(visual_styles)
+    comp    = random.choice(compositions)
+    seed    = random.randint(1000, 9999)  # unique seed per post
+
     slide_prompts = [
-        # Slide 1 — Visual concept / intro
+        # Slide 1 — Concept visualization
         (
-            f"Dark mode developer workspace, {theme} concept visualization, "
-            f"{img_style['aesthetic']}, {img_style['colors']}, "
-            f"cinematic wide shot, glowing screen, "
+            f"Instagram reel background, {theme} concept, "
+            f"{style}, {color}, {comp}, "
+            f"developer workspace aesthetic, "
+            f"seed:{seed}, "
             f"9:16 portrait, ultra high quality, no text, no watermarks, no people"
         ),
         # Slide 2 — Code focused
         (
-            f"Clean VS Code dark theme showing {theme} code example, "
-            f"electric blue syntax highlighting on pure black background, "
-            f"code centered on screen, crisp and readable, "
+            f"VS Code dark theme, {theme} code example, "
+            f"{color}, syntax highlighting, "
+            f"clean code centered on screen, "
+            f"seed:{seed+1}, "
             f"9:16 portrait, ultra high quality, no watermarks"
         ),
-        # Slide 3 — Visual metaphor / inspiring
+        # Slide 3 — Abstract/inspiring
         (
-            f"Inspiring tech visual representing {theme}, "
-            f"{img_style['mood']}, {img_style['colors']}, "
-            f"abstract digital art, futuristic, "
+            f"Abstract tech art, {theme} visualization, "
+            f"{style}, {color}, "
+            f"inspiring digital art, futuristic, "
+            f"seed:{seed+2}, "
             f"9:16 portrait, ultra high quality, no text, no watermarks"
         ),
     ]
