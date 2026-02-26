@@ -87,7 +87,7 @@ async def startup():
 async def root(request: Request):
     return JSONResponse({"status": "running", "agent": "Instagram AI Agent - Web Dev"})
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health():
     checks = {
         "instagram_user_id": bool(os.getenv("INSTAGRAM_USER_ID")),
