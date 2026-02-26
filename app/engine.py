@@ -84,11 +84,11 @@ def _generate_single_image(slide_prompt: str, filename: str) -> str:
                 api_key=os.getenv("HF_API_KEY"),
             )
             image = client.text_to_image(
-                prompt=slide_prompt,
-                model="black-forest-labs/FLUX.1-schnell",
-                width=768,
-                height=1344,
-            )
+    prompt=slide_prompt,
+    model="black-forest-labs/FLUX.1-schnell",
+    width=576,    # ← was 768, smaller = less memory
+    height=1024,  # ← was 1344, smaller = less memory
+)
 
             if image.getbbox() is None:
                 raise ValueError("Blank image returned")
@@ -208,14 +208,15 @@ def create_reel(image_paths, audio_path: str) -> str:
         audio_input = ffmpeg.input(audio_path)
 
         out = ffmpeg.output(
-            video_scaled, audio_input, output_path,
-            vcodec='libx264',
-            acodec='aac',
-            pix_fmt='yuv420p',
-            movflags='+faststart',
-            r=30,
-            shortest=None
-        )
+      video_scaled, audio_input, output_path,
+      vcodec='libx264',
+       acodec='aac',
+       pix_fmt='yuv420p',
+       movflags='+faststart',
+        r=30,
+        shortest=None,
+    **{'threads': '1'}   # ← limits CPU/memory usage
+)
         ffmpeg.run(out, overwrite_output=True, quiet=True)
         print(f"[ENGINE] ✅ Slideshow reel ready: {output_path}")
         return output_path
@@ -239,12 +240,11 @@ def build_hashtags() -> str:
 
 # ── MASTER PIPELINE ───────────────────────────────────────────
 async def run_engine(theme: str) -> dict:
-    """Full pipeline: Text → 3 Images → Voice → Slideshow Video"""
     content = await generate_content(theme)
 
-    # Generate 3 slide images + voice in parallel
+    # Changed count=3 to count=1 — saves memory on Render free tier
     results = await asyncio.gather(
-        generate_slideshow_images(theme, count=3),
+        generate_slideshow_images(theme, count=1),  # ← was count=3
         generate_voice(content['voice_script'])
     )
 
