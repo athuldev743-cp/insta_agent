@@ -7,4 +7,5 @@ cloudinary
 requests
 python-dotenv
 apscheduler
-huggingface_hub Pillow
+huggingface_hub
+Pillow
