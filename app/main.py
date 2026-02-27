@@ -10,6 +10,8 @@ from starlette.requests import Request
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from datetime import datetime
+import pytz
 import atexit
 
 from engine import run_engine
@@ -25,6 +27,7 @@ scheduler   = BackgroundScheduler(timezone="Asia/Kolkata")
 THEMES      = AGENT_CONFIG["themes"]
 theme_index = 0
 
+
 async def run_post_cycle():
     global theme_index
     theme       = THEMES[theme_index % len(THEMES)]
@@ -33,7 +36,7 @@ async def run_post_cycle():
     try:
         print("[AGENT] Step 1: Running engine...", flush=True)
         result = await run_engine(theme)
-        print(f"[AGENT] Step 2: Engine done. Posting to Instagram...", flush=True)
+        print(f"[AGENT] Step 2: Posting to Instagram...", flush=True)
         post_id = post_reel_full_pipeline(
             video_path=result['video_path'],
             caption=result['caption']
@@ -44,6 +47,7 @@ async def run_post_cycle():
         print(f"[AGENT] ❌ Failed: {e}", flush=True)
         traceback.print_exc()
 
+
 def run_post_cycle_sync():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -51,6 +55,7 @@ def run_post_cycle_sync():
         loop.run_until_complete(run_post_cycle())
     finally:
         loop.close()
+
 
 def keep_alive_ping():
     try:
@@ -60,35 +65,58 @@ def keep_alive_ping():
     except Exception as e:
         print(f"[AGENT] ⚠️  Keep-alive failed: {e}", flush=True)
 
+
 @app.on_event("startup")
 async def startup():
     auto_refresh_if_needed()
+
     post_times = AGENT_CONFIG["post_times"]
-    tz         = AGENT_CONFIG["timezone"]
+    tz_name    = AGENT_CONFIG["timezone"]
+    tz         = pytz.timezone(tz_name)
+    now        = datetime.now(tz)
+
     for pt in post_times:
         scheduler.add_job(
             run_post_cycle_sync,
-            CronTrigger(hour=pt["hour"], minute=pt["minute"], timezone=tz),
+            CronTrigger(hour=pt["hour"], minute=pt["minute"], timezone=tz_name),
             id=pt["label"],
             name=f"Post at {pt['hour']:02d}:{pt['minute']:02d}"
         )
-        print(f"[AGENT] ✅ Scheduled: {pt['label']} at {pt['hour']:02d}:{pt['minute']:02d} {tz}", flush=True)
+        print(f"[AGENT] ✅ Scheduled: {pt['label']} at {pt['hour']:02d}:{pt['minute']:02d} {tz_name}", flush=True)
+
+        # Missed post detection — fires if restarted within 30 min of scheduled time
+        scheduled_time = now.replace(hour=pt["hour"], minute=pt["minute"], second=0, microsecond=0)
+        time_diff      = (now - scheduled_time).total_seconds()
+
+        if 0 < time_diff < 1800:
+            print(f"[AGENT] ⚠️  Missed {pt['label']} by {int(time_diff/60)} mins — firing now!", flush=True)
+            scheduler.add_job(
+                run_post_cycle_sync,
+                'date',
+                run_date=datetime.now(tz),
+                id=f"{pt['label']}_catchup",
+                name=f"Catchup {pt['label']}"
+            )
+
     scheduler.add_job(
         keep_alive_ping,
         CronTrigger(minute="*/14"),
         id="keep_alive",
         name="Keep Alive Ping"
     )
+
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown())
     print(f"[AGENT] ✅ Agent live — {len(THEMES)} themes loaded", flush=True)
+
 
 @app.api_route("/", methods=["GET", "HEAD"])
 async def root(request: Request):
     return JSONResponse({"status": "running", "agent": "Instagram AI Agent - Web Dev"})
 
+
 @app.api_route("/health", methods=["GET", "HEAD"])
-def health():
+def health(request: Request):
     checks = {
         "instagram_user_id": bool(os.getenv("INSTAGRAM_USER_ID")),
         "instagram_token":   bool(os.getenv("INSTAGRAM_ACCESS_TOKEN")),
@@ -102,31 +130,31 @@ def health():
         status_code=200 if all_ok else 500
     )
 
+
 @app.post("/post-now")
 async def post_now(background_tasks: BackgroundTasks, theme: str = "HTML basics"):
     background_tasks.add_task(run_post_cycle)
     return {"status": "started", "theme": theme}
 
+
 @app.get("/post-debug")
 async def post_debug(theme: str = "HTML basics for beginners"):
     global theme_index
-    print(f"[DEBUG] Starting debug post: {theme}", flush=True)
+    print(f"[DEBUG] Starting: {theme}", flush=True)
     try:
-        print("[DEBUG] Step 1: Engine...", flush=True)
-        result = await run_engine(theme)
-        print(f"[DEBUG] Step 2: Caption: {result['caption']}", flush=True)
-        print("[DEBUG] Step 3: Posting...", flush=True)
+        result  = await run_engine(theme)
         post_id = post_reel_full_pipeline(
             video_path=result['video_path'],
             caption=result['caption']
         )
-        print(f"[DEBUG] ✅ Done! Post ID: {post_id}", flush=True)
+        print(f"[DEBUG] ✅ Post ID: {post_id}", flush=True)
         return {"status": "success", "post_id": post_id, "caption": result['caption']}
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
-        print(f"[DEBUG] ❌ Error:\n{tb}", flush=True)
+        print(f"[DEBUG] ❌ {tb}", flush=True)
         raise HTTPException(status_code=500, detail=tb)
+
 
 @app.get("/schedule-status")
 def schedule_status():
@@ -140,6 +168,7 @@ def schedule_status():
         "themes_count": len(THEMES),
         "next_theme":   THEMES[theme_index % len(THEMES)]
     }
+
 
 @app.get("/test-engine")
 async def test_engine(theme: str = "HTML basics for beginners"):

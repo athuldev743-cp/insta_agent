@@ -9,3 +9,4 @@ python-dotenv
 apscheduler
 huggingface_hub
 Pillow
+pytz
