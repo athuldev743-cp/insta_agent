@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from datetime import datetime
-import pytz
+from zoneinfo import ZoneInfo
 import atexit
 
 from engine import run_engine
@@ -72,7 +72,7 @@ async def startup():
 
     post_times = AGENT_CONFIG["post_times"]
     tz_name    = AGENT_CONFIG["timezone"]
-    tz         = pytz.timezone(tz_name)
+    tz         = ZoneInfo(tz_name)          # ← zoneinfo instead of pytz
     now        = datetime.now(tz)
 
     for pt in post_times:
@@ -84,7 +84,7 @@ async def startup():
         )
         print(f"[AGENT] ✅ Scheduled: {pt['label']} at {pt['hour']:02d}:{pt['minute']:02d} {tz_name}", flush=True)
 
-        # Missed post detection — fires if restarted within 30 min of scheduled time
+        # Missed post detection
         scheduled_time = now.replace(hour=pt["hour"], minute=pt["minute"], second=0, microsecond=0)
         time_diff      = (now - scheduled_time).total_seconds()
 
@@ -98,13 +98,7 @@ async def startup():
                 name=f"Catchup {pt['label']}"
             )
 
-    scheduler.add_job(
-        keep_alive_ping,
-        CronTrigger(minute="*/14"),
-        id="keep_alive",
-        name="Keep Alive Ping"
-    )
-
+    scheduler.add_job(keep_alive_ping, CronTrigger(minute="*/14"), id="keep_alive", name="Keep Alive Ping")
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown())
     print(f"[AGENT] ✅ Agent live — {len(THEMES)} themes loaded", flush=True)
