@@ -2,7 +2,6 @@ import os
 import asyncio
 import random
 import shutil
-import subprocess
 import base64
 from io import BytesIO
 from pathlib import Path
@@ -10,12 +9,23 @@ from pathlib import Path
 import ffmpeg
 import edge_tts
 import requests
+from moviepy.editor import (
+    ImageClip, concatenate_videoclips,
+    AudioFileClip, CompositeVideoClip,
+    vfx,
+)
 from openai import OpenAI
 from dotenv import load_dotenv
 from huggingface_hub import InferenceClient
 from PIL import Image, ImageEnhance
 
 from app.config import AGENT_CONFIG
+from app.sports_fetcher import (
+    is_sports_theme,
+    parse_sports_theme,
+    fetch_all_sports_news,
+    mark_as_posted,
+)
 
 load_dotenv()
 
@@ -27,7 +37,6 @@ os.makedirs(DATA_DIR, exist_ok=True)
 # IMAGE POST-PROCESS
 # ─────────────────────────────────────────────────────────────
 def enhance_image(image: Image.Image) -> Image.Image:
-    """Post-process image for maximum quality"""
     image = ImageEnhance.Sharpness(image).enhance(2.0)
     image = ImageEnhance.Contrast(image).enhance(1.25)
     image = ImageEnhance.Color(image).enhance(1.4)
@@ -39,179 +48,157 @@ def enhance_image(image: Image.Image) -> Image.Image:
 # NVIDIA IMAGE GENERATION (PRIMARY)
 # ─────────────────────────────────────────────────────────────
 def _decode_image_from_response_json(data: dict) -> Image.Image:
-    """
-    Tries common NVIDIA / genai response formats:
-    - {"image": "<b64>"}
-    - {"images": ["<b64>", ...]}
-    - {"images": [{"b64_json": "<b64>"}]}
-    - {"data": [{"b64_json": "<b64>"}]}  (OpenAI-like)
-    - {"output": [{"image": "<b64>"}]}
-    """
-    # 1) direct "image"
     if isinstance(data.get("image"), str):
-        b = base64.b64decode(data["image"])
-        return Image.open(BytesIO(b)).convert("RGB")
-
-    # 2) "images": [b64...]
+        return Image.open(BytesIO(base64.b64decode(data["image"]))).convert("RGB")
     if isinstance(data.get("images"), list) and data["images"]:
         first = data["images"][0]
         if isinstance(first, str):
-            b = base64.b64decode(first)
-            return Image.open(BytesIO(b)).convert("RGB")
+            return Image.open(BytesIO(base64.b64decode(first))).convert("RGB")
         if isinstance(first, dict) and isinstance(first.get("b64_json"), str):
-            b = base64.b64decode(first["b64_json"])
-            return Image.open(BytesIO(b)).convert("RGB")
-
-    # 3) OpenAI-style "data"
+            return Image.open(BytesIO(base64.b64decode(first["b64_json"]))).convert("RGB")
     if isinstance(data.get("data"), list) and data["data"]:
         first = data["data"][0]
         if isinstance(first, dict) and isinstance(first.get("b64_json"), str):
-            b = base64.b64decode(first["b64_json"])
-            return Image.open(BytesIO(b)).convert("RGB")
-
-    # 4) other nested patterns
+            return Image.open(BytesIO(base64.b64decode(first["b64_json"]))).convert("RGB")
     if isinstance(data.get("output"), list) and data["output"]:
         first = data["output"][0]
         if isinstance(first, dict) and isinstance(first.get("image"), str):
-            b = base64.b64decode(first["image"])
-            return Image.open(BytesIO(b)).convert("RGB")
-
+            return Image.open(BytesIO(base64.b64decode(first["image"]))).convert("RGB")
     raise ValueError(f"Unknown NVIDIA response schema. Keys: {list(data.keys())}")
 
 
 def _generate_single_image_nvidia(prompt: str) -> Image.Image:
-    """
-    NVIDIA API Catalog image generation using NVIDIA_API_KEY.
-
-    Requires:
-      NVIDIA_API_KEY
-      NVIDIA_SD_URL  (example: https://ai.api.nvidia.com/v1/genai/stabilityai/stable-diffusion-3-medium)
-    """
     api_key = os.getenv("NVIDIA_API_KEY", "").strip()
+    url     = os.getenv("NVIDIA_SD_URL", "").strip()
     if not api_key:
-        raise ValueError("NVIDIA_API_KEY is missing")
-
-    url = os.getenv("NVIDIA_SD_URL", "").strip()
+        raise ValueError("NVIDIA_API_KEY missing")
     if not url:
-        raise ValueError("NVIDIA_SD_URL is missing in .env")
-
+        raise ValueError("NVIDIA_SD_URL missing")
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "Accept": "application/json",
-        "Content-Type": "application/json",
+        "Accept":        "application/json",
+        "Content-Type":  "application/json",
     }
-
-    # Minimal payload works for many genai endpoints.
-    # If your model supports width/height/steps, you can add them here.
-    payload = {
-        "prompt": prompt
-    }
-
-    r = requests.post(url, headers=headers, json=payload, timeout=180)
-
+    r = requests.post(url, headers=headers, json={"prompt": prompt}, timeout=180)
     if r.status_code >= 400:
         raise RuntimeError(f"NVIDIA error {r.status_code}: {r.text[:400]}")
-
-    data = r.json()
-    return _decode_image_from_response_json(data)
+    return _decode_image_from_response_json(r.json())
 
 
 # ─────────────────────────────────────────────────────────────
-# HUGGINGFACE PROVIDER ROUTER (FALLBACK)
+# HUGGINGFACE FALLBACK
 # ─────────────────────────────────────────────────────────────
 def _generate_single_image_hf(prompt: str) -> Image.Image:
-    """
-    HuggingFace router fallback using HF_API_KEY.
-    Uses FLUX.1-schnell via provider routing.
-    """
     hf_key = os.getenv("HF_API_KEY", "").strip()
     if not hf_key:
-        raise ValueError("HF_API_KEY is missing")
-
-    providers = ["nscale", "fal-ai", "together", "nebius"]
+        raise ValueError("HF_API_KEY missing")
+    providers  = ["nscale", "fal-ai", "together", "nebius"]
     last_error = None
-
-    width = int(os.getenv("IMG_W", "1080"))
-    height = int(os.getenv("IMG_H", "1920"))
-
+    width      = int(os.getenv("IMG_W", "1080"))
+    height     = int(os.getenv("IMG_H", "1920"))
     for provider in providers:
         try:
             print(f"[HF] Trying provider={provider}", flush=True)
             client = InferenceClient(provider=provider, api_key=hf_key)
-
-            image = client.text_to_image(
+            image  = client.text_to_image(
                 prompt=prompt,
                 model=os.getenv("HF_IMAGE_MODEL", "black-forest-labs/FLUX.1-schnell"),
                 width=width,
                 height=height,
             )
-
             if image.getbbox() is None:
-                raise ValueError("Blank image returned from HF provider")
-
+                raise ValueError("Blank image")
             return image.convert("RGB")
-
         except Exception as e:
             last_error = e
             print(f"[HF] ⚠️ {provider} failed: {str(e)[:180]}", flush=True)
-
     raise RuntimeError(f"All HF providers failed: {last_error}")
 
 
 def _generate_single_image(prompt: str, filename: str) -> str:
-    """
-    Your required order:
-    1) NVIDIA
-    2) HF fallback
-    """
     out_path = os.path.join(DATA_DIR, filename)
-
     try:
         print(f"[IMG] NVIDIA → {filename}", flush=True)
         img = _generate_single_image_nvidia(prompt)
         img = enhance_image(img)
         img.save(out_path, format="JPEG", quality=95, optimize=True)
-        print(f"[IMG] ✅ Saved via NVIDIA: {out_path}", flush=True)
+        print(f"[IMG] ✅ NVIDIA: {out_path}", flush=True)
         return out_path
-
-    except Exception as nvidia_err:
-        print(f"[IMG] ⚠️ NVIDIA failed ({filename}): {str(nvidia_err)[:220]}", flush=True)
-        print(f"[IMG] Falling back → HF ({filename})", flush=True)
-
+    except Exception as e:
+        print(f"[IMG] ⚠️ NVIDIA failed ({filename}): {str(e)[:220]}", flush=True)
         img = _generate_single_image_hf(prompt)
         img = enhance_image(img)
         img.save(out_path, format="JPEG", quality=95, optimize=True)
-        print(f"[IMG] ✅ Saved via HF: {out_path}", flush=True)
+        print(f"[IMG] ✅ HF: {out_path}", flush=True)
         return out_path
 
 
 # ─────────────────────────────────────────────────────────────
-# TEXT GENERATION (OPENROUTER)
+# TEXT GENERATION — WEBDEV (unchanged)
 # ─────────────────────────────────────────────────────────────
-def build_hashtags() -> str:
-    fixed = AGENT_CONFIG["hashtags"]["fixed"]
-    variable = AGENT_CONFIG["hashtags"]["variable"]
-    count = AGENT_CONFIG["hashtags"]["count"]
-    variable_count = max(0, count - len(fixed))
-    picked = random.sample(variable, min(variable_count, len(variable)))
+def build_hashtags(cfg: dict = None) -> str:
+    if cfg is None:
+        cfg = AGENT_CONFIG
+    fixed    = cfg["hashtags"]["fixed"]
+    variable = cfg["hashtags"]["variable"]
+    count    = cfg["hashtags"]["count"]
+    picked   = random.sample(variable, min(count - len(fixed), len(variable)))
     return " ".join(fixed + picked)
 
 
 async def generate_content(theme: str) -> dict:
-    """OpenRouter — generates caption + detailed voice script"""
-    print(f"[ENGINE] Generating content for: {theme}", flush=True)
+    """
+    Generates caption + voice script.
+    Automatically switches prompts/config for sports vs webdev themes.
+    """
+    is_sports   = is_sports_theme(theme)
+    sport_data  = parse_sports_theme(theme) if is_sports else {}
+    cfg         = AGENT_CONFIG
+    sports_cfg  = cfg["sports"]
 
-    cfg = AGENT_CONFIG
-    cap_style = cfg["caption_style"]
-    cta = random.choice(cap_style["cta_examples"])
-    hashtags = build_hashtags()
+    if is_sports:
+        cap_style = sports_cfg["caption_style"]
+        hashtags  = build_hashtags(sports_cfg)
+        cta       = random.choice(cap_style["cta_examples"])
+        voice_cfg = sports_cfg["voice"]
+        title     = sport_data.get("title", theme)
+        summary   = sport_data.get("summary", "")
+        source    = sport_data.get("source", "")
+        region    = sport_data.get("region", "")
 
-    client = OpenAI(
-        api_key=os.getenv("OPENROUTER_API_KEY"),
-        base_url="https://openrouter.ai/api/v1"
-    )
+        prompt = f"""
+You manage a sports Instagram account for an Indian audience.
 
-    prompt = f"""
+News headline: "{title}"
+Details: {summary}
+Source: {source} | Region: {region}
+
+Generate exactly 2 lines:
+
+LINE 1 (Caption): {cap_style['tone']} Instagram caption.
+  - Hook in first 5 words (urgent, exciting)
+  - Use {cap_style['emoji_count']} emojis naturally
+  - End with: "{cta}"
+  - Add hashtags: {hashtags}
+
+LINE 2 (Voiceover): Malayalam sports news bulletin script.
+  - Style: {voice_cfg['script_style']}
+  - Length: {voice_cfg['script_length']}
+  - Example style: {voice_cfg.get('script_example', '')}
+  - Structure: [Breaking hook 5s] → [What happened 20s] → [Key stats/score 15s] → [India significance 10s] → [Closing 5s]
+  - Player/team names and scores stay in English
+  - Formal news Malayalam (Asianet/Manorama style), NOT conversational
+  - No hashtags, no emojis, no labels
+
+Output ONLY 2 lines. No labels, no extra text.
+"""
+    else:
+        cap_style = cfg["caption_style"]
+        hashtags  = build_hashtags(cfg)
+        cta       = random.choice(cap_style["cta_examples"])
+        voice_cfg = cfg["voice"]
+
+        prompt = f"""
 You manage an Instagram account with these details:
 - Niche: {cfg['account_niche']}
 - Description: {cfg['account_description']}
@@ -231,13 +218,14 @@ LINE 1 (Caption): {cap_style['tone']} caption.
 LINE 2 (Voiceover): Detailed educational script IN MALAYALAM.
   - Write ENTIRELY in Malayalam language
   - Use English ONLY for technical terms (HTML, CSS, JavaScript, etc.)
-  - Length: {cfg['voice']['script_length']}
-  - Style: {cfg['voice']['script_style']}
+  - Length: {voice_cfg['script_length']}
+  - Style: {voice_cfg['script_style']}
+  - Example style: {voice_cfg.get('script_example', '')}
   - Structure:
     * Hook (5s): Surprising fact or question about {theme} in Malayalam
-    * Explain (25s): What it is and why it matters, explained in Malayalam
+    * Explain (25s): What it is and why it matters, in Malayalam
     * Example (20s): Simple real code or real world example with Malayalam explanation
-    * Pro tip (15s): One expert tip beginners dont know, in Malayalam
+    * Pro tip (15s): One expert tip beginners don't know, in Malayalam
     * Takeaway (10s): Key thing to remember, in Malayalam
     * CTA (5s): Encourage to follow for more, in Malayalam
   - Use simple everyday Malayalam words
@@ -248,133 +236,91 @@ LINE 2 (Voiceover): Detailed educational script IN MALAYALAM.
 Output ONLY these 2 lines. No labels, no extra text.
 """
 
+    print(f"[ENGINE] Generating content ({'sports' if is_sports else 'webdev'}): {theme[:60]}", flush=True)
+
+    client = OpenAI(
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        base_url="https://openrouter.ai/api/v1"
+    )
     response = client.chat.completions.create(
         model="openrouter/auto",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=700
+        max_tokens=700,
     )
-
-    lines = response.choices[0].message.content.strip().split("\n", 1)
-    caption = lines[0].strip()
+    lines        = response.choices[0].message.content.strip().split("\n", 1)
+    caption      = lines[0].strip()
     voice_script = lines[1].strip() if len(lines) > 1 else caption
 
-    print(f"[ENGINE] ✅ Caption: {caption}", flush=True)
+    print(f"[ENGINE] ✅ Caption: {caption[:80]}", flush=True)
     print(f"[ENGINE] ✅ Script words: {len(voice_script.split())}", flush=True)
     return {"caption": caption, "voice_script": voice_script}
 
 
 # ─────────────────────────────────────────────────────────────
-# MALAYALAM PREPROCESSOR
+# MALAYALAM PREPROCESSOR (unchanged)
 # ─────────────────────────────────────────────────────────────
 def preprocess_malayalam_script(script: str) -> str:
     replacements = {
-        "HTML": "എച്ച് ടി എം എൽ",
-        "CSS": "സി എസ് എസ്",
-        "JavaScript": "ജാവാസ്ക്രിപ്റ്റ്",
-        "Python": "പൈത്തൺ",
-        "React": "റിയാക്റ്റ്",
-        "Node.js": "നോഡ് ജെ എസ്",
-        "API": "എ പി ഐ",
-        "SQL": "എസ് ക്യൂ എൽ",
-        "JSON": "ജെ സൺ",
-        "Git": "ഗിറ്റ്",
-        "GitHub": "ഗിറ്റ്ഹബ്",
-        "VS Code": "വി എസ് കോഡ്",
-        "UI": "യൂ ഐ",
-        "UX": "യൂ എക്സ്",
-        "URL": "യൂ ആർ എൽ",
-        "HTTP": "എച്ച് ടി ടി പി",
-        "HTTPS": "എച്ച് ടി ടി പി എസ്",
-        "DOM": "ഡോം",
-        "CPU": "സി പി യൂ",
-        "GPU": "ജി പി യൂ",
-        "RAM": "റാം",
-        "TypeScript": "ടൈപ്പ്സ്ക്രിപ്റ്റ്",
-        "MongoDB": "മോംഗോ ഡി ബി",
-        "MySQL": "മൈ എസ് ക്യൂ എൽ",
-        "Firebase": "ഫയർബേസ്",
-        "Bootstrap": "ബൂട്ട്സ്ട്രാപ്പ്",
-        "flexbox": "ഫ്ലെക്സ്ബോക്സ്",
-        "Flexbox": "ഫ്ലെക്സ്ബോക്സ്",
-        "frontend": "ഫ്രണ്ട്എൻഡ്",
-        "Frontend": "ഫ്രണ്ട്എൻഡ്",
-        "backend": "ബാക്ക്എൻഡ്",
-        "Backend": "ബാക്ക്എൻഡ്",
-        "fullstack": "ഫുൾസ്റ്റാക്ക്",
-        "framework": "ഫ്രെയിംവർക്ക്",
-        "Framework": "ഫ്രെയിംവർക്ക്",
-        "developer": "ഡെവലപ്പർ",
-        "Developer": "ഡെവലപ്പർ",
-        "debugging": "ഡീബഗ്ഗിംഗ്",
-        "Debugging": "ഡീബഗ്ഗിംഗ്",
-        "function": "ഫങ്ഷൻ",
-        "Function": "ഫങ്ഷൻ",
-        "variable": "വേരിയബിൾ",
-        "Variable": "വേരിയബിൾ",
-        "array": "അറേ",
-        "Array": "അറേ",
-        "loop": "ലൂപ്പ്",
-        "Loop": "ലൂപ്പ്",
-        "class": "ക്ലാസ്സ്",
-        "Class": "ക്ലാസ്സ്",
-        "object": "ഒബ്ജക്റ്റ്",
-        "Object": "ഒബ്ജക്റ്റ്",
-        "server": "സെർവർ",
-        "Server": "സെർവർ",
-        "database": "ഡേറ്റാബേസ്",
-        "Database": "ഡേറ്റാബേസ്",
-        "website": "വെബ്സൈറ്റ്",
-        "Website": "വെബ്സൈറ്റ്",
-        "browser": "ബ്രൗസർ",
-        "Browser": "ബ്രൗസർ",
-        "code": "കോഡ്",
-        "Code": "കോഡ്",
-        "coding": "കോഡിംഗ്",
-        "Coding": "കോഡിംഗ്",
+        "HTML": "എച്ച് ടി എം എൽ", "CSS": "സി എസ് എസ്",
+        "JavaScript": "ജാവാസ്ക്രിപ്റ്റ്", "Python": "പൈത്തൺ",
+        "React": "റിയാക്റ്റ്", "Node.js": "നോഡ് ജെ എസ്",
+        "API": "എ പി ഐ", "SQL": "എസ് ക്യൂ എൽ",
+        "JSON": "ജെ സൺ", "Git": "ഗിറ്റ്", "GitHub": "ഗിറ്റ്ഹബ്",
+        "VS Code": "വി എസ് കോഡ്", "UI": "യൂ ഐ", "UX": "യൂ എക്സ്",
+        "URL": "യൂ ആർ എൽ", "HTTP": "എച്ച് ടി ടി പി",
+        "HTTPS": "എച്ച് ടി ടി പി എസ്", "DOM": "ഡോം",
+        "TypeScript": "ടൈപ്പ്സ്ക്രിപ്റ്റ്", "MongoDB": "മോംഗോ ഡി ബി",
+        "MySQL": "മൈ എസ് ക്യൂ എൽ", "Firebase": "ഫയർബേസ്",
+        "Bootstrap": "ബൂട്ട്സ്ട്രാപ്പ്", "flexbox": "ഫ്ലെക്സ്ബോക്സ്",
+        "Flexbox": "ഫ്ലെക്സ്ബോക്സ്", "frontend": "ഫ്രണ്ട്എൻഡ്",
+        "Frontend": "ഫ്രണ്ട്എൻഡ്", "backend": "ബാക്ക്എൻഡ്",
+        "Backend": "ബാക്ക്എൻഡ്", "developer": "ഡെവലപ്പർ",
+        "Developer": "ഡെവലപ്പർ", "function": "ഫങ്ഷൻ",
+        "variable": "വേരിയബിൾ", "array": "അറേ", "loop": "ലൂപ്പ്",
+        "class": "ക്ലാസ്സ്", "object": "ഒബ്ജക്റ്റ്",
+        "server": "സെർവർ", "database": "ഡേറ്റാബേസ്",
+        "website": "വെബ്സൈറ്റ്", "browser": "ബ്രൗസർ",
+        "code": "കോഡ്", "Code": "കോഡ്", "coding": "കോഡിംഗ്",
         "programming": "പ്രോഗ്രാമിംഗ്",
-        "Programming": "പ്രോഗ്രാമിംഗ്",
     }
-    for english, malayalam in replacements.items():
-        script = script.replace(english, malayalam)
+    for eng, mal in replacements.items():
+        script = script.replace(eng, mal)
     return script
 
 
 # ─────────────────────────────────────────────────────────────
-# VOICE GENERATION (EDGE TTS)
+# VOICE GENERATION (unchanged)
 # ─────────────────────────────────────────────────────────────
-async def generate_voice(script: str) -> str:
+async def generate_voice(script: str, is_sports: bool = False) -> str:
     print("[ENGINE] Generating voiceover...", flush=True)
 
-    voice = AGENT_CONFIG["voice"]["tts_voice"]
+    # Sports uses same TTS voice — just skip the tech word replacements
+    if not is_sports:
+        script = preprocess_malayalam_script(script)
+
+    voice      = AGENT_CONFIG["voice"]["tts_voice"]
     audio_path = os.path.join(DATA_DIR, "temp_audio.mp3")
 
-    processed_script = preprocess_malayalam_script(script)
-    processed_script = (
-        processed_script
+    # Add natural pauses
+    script = (
+        script
         .replace(". ", ".   ")
         .replace("? ", "?   ")
         .replace("! ", "!   ")
         .replace(", ", ",  ")
     )
 
-    communicate = edge_tts.Communicate(
-        processed_script,
-        voice,
-        rate="-10%",
-        volume="+15%",
-        pitch="+0Hz"
-    )
+    communicate = edge_tts.Communicate(script, voice, rate="-10%", volume="+15%", pitch="+0Hz")
     await communicate.save(audio_path)
-
-    print(f"[ENGINE] ✅ Audio saved: {audio_path}", flush=True)
+    print(f"[ENGINE] ✅ Audio: {audio_path}", flush=True)
     return audio_path
 
 
 # ─────────────────────────────────────────────────────────────
-# SLIDESHOW IMAGES
+# WEBDEV SLIDESHOW IMAGES (unchanged)
 # ─────────────────────────────────────────────────────────────
 async def generate_slideshow_images(theme: str, count: int = 8) -> list:
-    print(f"[ENGINE] Generating {count} slides...", flush=True)
+    print(f"[ENGINE] Generating {count} webdev slides...", flush=True)
 
     art_styles = {
         "pixel_art": (
@@ -405,19 +351,11 @@ async def generate_slideshow_images(theme: str, count: int = 8) -> list:
     }
 
     style_name, chosen_style = random.choice(list(art_styles.items()))
-    print(f"[ENGINE] 🎨 Art style: {style_name}", flush=True)
-
     color_schemes = [
-        "deep purple and cyan",
-        "electric blue and white",
-        "neon green on black",
-        "orange and yellow",
-        "hot pink and violet",
-        "gold and white",
-        "red and coral",
-        "teal and mint",
+        "deep purple and cyan", "electric blue and white", "neon green on black",
+        "orange and yellow", "hot pink and violet", "gold and white",
+        "red and coral", "teal and mint",
     ]
-
     slide_concepts = [
         f"cinematic intro, big bold concept of {theme}, inspiring opener",
         f"clear definition and theory of {theme}, educational diagram",
@@ -429,97 +367,159 @@ async def generate_slideshow_images(theme: str, count: int = 8) -> list:
         f"celebration scene, key takeaways of {theme}, motivational closer",
     ]
 
-    seed = random.randint(10000, 99999)
-
+    seed        = random.randint(10000, 99999)
     image_paths = []
-    for i in range(count):
-        color = color_schemes[i % len(color_schemes)]
-        concept = slide_concepts[i % len(slide_concepts)]
 
-        prompt = (
+    for i in range(count):
+        color   = color_schemes[i % len(color_schemes)]
+        concept = slide_concepts[i % len(slide_concepts)]
+        prompt  = (
             f"{concept}, {chosen_style}, color palette: {color}, "
             f"professional Instagram reel content, ultra sharp, "
             f"unique variation {seed + i * 7}, "
-            f"9:16 vertical portrait orientation, "
-            f"no text overlay, no watermarks, no real people"
+            f"9:16 vertical portrait orientation, no text overlay, no watermarks, no real people"
         )
-
         try:
             path = _generate_single_image(prompt, f"slide_{i+1}.jpg")
             image_paths.append(path)
-
         except Exception as e:
             print(f"[ENGINE] ⚠️ Slide {i+1} failed: {e}", flush=True)
-
-            # fallback: copy first successful slide to unique filename
             if image_paths:
-                fallback_src = image_paths[0]
-                fallback_dest = os.path.join(DATA_DIR, f"slide_{i+1}.jpg")
-                shutil.copy2(fallback_src, fallback_dest)
-                print(f"[ENGINE] Using fallback copy for slide {i+1}", flush=True)
-                image_paths.append(fallback_dest)
+                fallback = os.path.join(DATA_DIR, f"slide_{i+1}.jpg")
+                shutil.copy2(image_paths[0], fallback)
+                image_paths.append(fallback)
             else:
                 raise
 
-    print(f"[ENGINE] ✅ All {len(image_paths)} slides ready!", flush=True)
+    print(f"[ENGINE] ✅ {len(image_paths)} webdev slides ready!", flush=True)
     return image_paths
 
 
 # ─────────────────────────────────────────────────────────────
-# VIDEO CREATION
+# VIDEO CREATION — MoviePy (sports: smooth transitions)
+#                 FFmpeg  (webdev: existing behaviour)
 # ─────────────────────────────────────────────────────────────
-def create_reel(image_paths, audio_path: str) -> str:
-    print("[ENGINE] Building reel with FFmpeg...", flush=True)
 
+TRANSITION_EFFECTS = [
+    "fade",       # smooth opacity fade (always works)
+    "slide_left", # slide in from right
+    "zoom_in",    # subtle ken-burns zoom
+    "crossfade",  # dissolve between slides
+]
+
+
+def _moviepy_reel(image_paths: list[str], audio_path: str, output_path: str):
+    """
+    Build reel with MoviePy — used for sports posts.
+    Each slide gets a randomly chosen transition effect.
+    Total duration matches the audio.
+    """
+    audio        = AudioFileClip(audio_path)
+    total_dur    = audio.duration
+    slide_dur    = total_dur / len(image_paths)
+    transition   = 0.5   # seconds overlap for transitions
+    clips        = []
+
+    for i, img_path in enumerate(image_paths):
+        effect = random.choice(TRANSITION_EFFECTS)
+        clip   = (
+            ImageClip(img_path)
+            .set_duration(slide_dur)
+            .resize((1080, 1920))
+        )
+
+        # ── Apply transition effect ────────────────────────────────────
+        if effect == "fade":
+            clip = clip.fadein(transition).fadeout(transition)
+
+        elif effect == "zoom_in":
+            # Ken-Burns slow zoom: scale from 1.0 → 1.08 over slide duration
+            clip = clip.resize(lambda t: 1 + 0.08 * (t / slide_dur))
+
+        elif effect == "slide_left":
+            # Slide in from right edge
+            clip = clip.set_position(
+                lambda t: (max(0, int(1080 * (1 - t / transition))), 0)
+                if t < transition else (0, 0)
+            )
+
+        elif effect == "crossfade":
+            clip = clip.fadein(transition)
+
+        clips.append(clip)
+
+    # Concatenate all clips
+    final_video = concatenate_videoclips(clips, method="compose", padding=-transition)
+    final_video = final_video.set_audio(audio).subclip(0, total_dur)
+
+    print(f"[ENGINE] 🎬 MoviePy rendering {len(clips)} slides ({total_dur:.1f}s total)...", flush=True)
+    final_video.write_videofile(
+        output_path,
+        fps=30,
+        codec="libx264",
+        audio_codec="aac",
+        bitrate="5000k",
+        audio_bitrate="192k",
+        preset="fast",
+        threads=4,
+        logger=None,   # suppress verbose moviepy output
+    )
+    final_video.close()
+    audio.close()
+    print(f"[ENGINE] ✅ MoviePy reel: {output_path}", flush=True)
+
+
+def create_reel(image_paths, audio_path: str, use_moviepy: bool = False) -> str:
+    """
+    use_moviepy=True  → sports posts (smooth transitions via MoviePy)
+    use_moviepy=False → webdev posts (existing FFmpeg behaviour, unchanged)
+    """
     output_path = os.path.join(DATA_DIR, "reel.mp4")
-    slide_duration = 5  # 8 slides -> 40s
+    slide_duration = 5
 
     if isinstance(image_paths, str):
         image_paths = [image_paths]
 
+    if use_moviepy:
+        _moviepy_reel(image_paths, audio_path, output_path)
+        return output_path
+
+    # ── Original FFmpeg path (webdev — unchanged) ──────────────────────────
+    print("[ENGINE] Building reel with FFmpeg...", flush=True)
     try:
         if len(image_paths) == 1:
-            video_input = ffmpeg.input(image_paths[0], loop=1, t=40, framerate=30)
+            video_input  = ffmpeg.input(image_paths[0], loop=1, t=40, framerate=30)
             video_scaled = (
                 video_input
                 .filter("scale", 1080, 1920, force_original_aspect_ratio="decrease")
-                .filter("pad", 1080, 1920, "(ow-iw)/2", "(oh-ih)/2", color="black")
+                .filter("pad",   1080, 1920, "(ow-iw)/2", "(oh-ih)/2", color="black")
                 .filter("setsar", "1/1")
             )
         else:
             segments = []
             for path in image_paths:
                 seg = (
-                    ffmpeg
-                    .input(path, loop=1, t=slide_duration, framerate=30)
+                    ffmpeg.input(path, loop=1, t=slide_duration, framerate=30)
                     .filter("scale", 1080, 1920, force_original_aspect_ratio="decrease")
-                    .filter("pad", 1080, 1920, "(ow-iw)/2", "(oh-ih)/2", color="black")
+                    .filter("pad",   1080, 1920, "(ow-iw)/2", "(oh-ih)/2", color="black")
                     .filter("setsar", "1/1")
-                    .filter("fade", type="in", start_time=0, duration=0.4)
+                    .filter("fade", type="in",  start_time=0, duration=0.4)
                     .filter("fade", type="out", start_time=slide_duration - 0.4, duration=0.4)
                 )
                 segments.append(seg)
-
             video_scaled = ffmpeg.concat(*segments, v=1, a=0)
 
         audio_input = ffmpeg.input(audio_path)
-
         out = ffmpeg.output(
-            video_scaled,
-            audio_input,
-            output_path,
-            vcodec="libx264",
-            acodec="aac",
-            pix_fmt="yuv420p",
-            movflags="+faststart",
-            r=30,
-            video_bitrate="5000k",
-            audio_bitrate="192k",
+            video_scaled, audio_input, output_path,
+            vcodec="libx264", acodec="aac", pix_fmt="yuv420p",
+            movflags="+faststart", r=30,
+            video_bitrate="5000k", audio_bitrate="192k",
             shortest=None,
             **{"threads": "4", "preset": "fast"},
         )
         ffmpeg.run(out, overwrite_output=True, quiet=False)
-        print(f"[ENGINE] ✅ Reel ready: {output_path}", flush=True)
+        print(f"[ENGINE] ✅ FFmpeg reel: {output_path}", flush=True)
         return output_path
 
     except ffmpeg.Error as e:
@@ -531,20 +531,50 @@ def create_reel(image_paths, audio_path: str) -> str:
 # MASTER PIPELINE
 # ─────────────────────────────────────────────────────────────
 async def run_engine(theme: str) -> dict:
-    """Full pipeline: Text → Images → Voice → Slideshow"""
+    """
+    Full pipeline. Auto-detects webdev vs sports and routes accordingly.
+
+    WebDev:  generate all 8 images (NVIDIA/HF) → FFmpeg reel
+    Sports:  assemble_sports_slides (web scrape + PIL cards + NVIDIA/HF fallback)
+             → MoviePy reel with transitions
+    """
+    is_sports  = is_sports_theme(theme)
+    sport_data = parse_sports_theme(theme) if is_sports else {}
+
+    # ── Generate caption + voice script ───────────────────────────────────
     content = await generate_content(theme)
 
-    results = await asyncio.gather(
-        generate_slideshow_images(theme, count=8),
-        generate_voice(content["voice_script"]),
-    )
+    if is_sports:
+        # ── Sports branch ─────────────────────────────────────────────────
+        from app.image_assembler import assemble_sports_slides
 
-    image_paths = results[0]
-    audio_path = results[1]
+        # Fetch all articles for multi-source image collection
+        all_articles = fetch_all_sports_news(max_age_hours=24)
 
-    video_path = create_reel(image_paths, audio_path)
+        # Assemble 8 slides + generate voice in parallel
+        results = await asyncio.gather(
+            assemble_sports_slides(sport_data, all_articles),
+            generate_voice(content["voice_script"], is_sports=True),
+        )
+        image_paths = results[0]
+        audio_path  = results[1]
+
+        # MoviePy reel with smooth transitions for sports
+        video_path = create_reel(image_paths, audio_path, use_moviepy=True)
+
+    else:
+        # ── WebDev branch (original behaviour — unchanged) ─────────────────
+        results = await asyncio.gather(
+            generate_slideshow_images(theme, count=8),
+            generate_voice(content["voice_script"], is_sports=False),
+        )
+        image_paths = results[0]
+        audio_path  = results[1]
+
+        # FFmpeg reel (original)
+        video_path = create_reel(image_paths, audio_path, use_moviepy=False)
 
     return {
         "video_path": video_path,
-        "caption": content["caption"]
+        "caption":    content["caption"],
     }

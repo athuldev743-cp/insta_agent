@@ -38,9 +38,9 @@ def create_ig_container(video_url: str, caption: str) -> str:
     response = requests.post(
         f"{GRAPH_BASE}/{IG_USER_ID}/media",
         data={
-            'media_type': 'REELS',
-            'video_url': video_url,
-            'caption': caption,
+            'media_type':   'REELS',
+            'video_url':    video_url,
+            'caption':      caption,
             'access_token': IG_TOKEN
         }
     )
@@ -84,8 +84,20 @@ def publish_reel(container_id: str) -> str:
 
 
 def cleanup_temp_files():
-    for filename in ['slide_1.jpg', 'slide_2.jpg', 'slide_3.jpg',
-                     'temp_audio.mp3', 'reel.mp4']:
+    """
+    Delete all temporary files created during a post cycle.
+    Now covers all 8 slides (was previously only 3).
+    sports_cooldown.json and theme_index.txt are intentionally kept.
+    """
+    files_to_delete = [
+        # All 8 slide images
+        'slide_1.jpg', 'slide_2.jpg', 'slide_3.jpg', 'slide_4.jpg',
+        'slide_5.jpg', 'slide_6.jpg', 'slide_7.jpg', 'slide_8.jpg',
+        # Audio and final video
+        'temp_audio.mp3',
+        'reel.mp4',
+    ]
+    for filename in files_to_delete:
         path = os.path.join(DATA_DIR, filename)
         if os.path.exists(path):
             os.remove(path)
@@ -93,7 +105,7 @@ def cleanup_temp_files():
 
 
 def post_reel_full_pipeline(video_path: str, caption: str) -> str:
-    """Complete posting pipeline"""
+    """Complete posting pipeline — upload, publish, clean up."""
     try:
         video_url    = upload_to_cloudinary(video_path)
         container_id = create_ig_container(video_url, caption)
@@ -101,5 +113,4 @@ def post_reel_full_pipeline(video_path: str, caption: str) -> str:
         post_id      = publish_reel(container_id)
         return post_id
     finally:
-        cleanup_temp_files()  # Always clean up, even if posting fails
-
+        cleanup_temp_files()  # Always runs, even if posting fails

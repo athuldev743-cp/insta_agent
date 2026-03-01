@@ -17,3 +17,6 @@ transformers
 accelerate
 safetensors 
 apscheduler
+feedparser==6.0.11
+moviepy==1.0.3
+feedparser==6.0.11

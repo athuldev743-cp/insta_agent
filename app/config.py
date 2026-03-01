@@ -1,25 +1,32 @@
 # app/config.py
 # =====================================================
-# AGENT CONFIGURATION — Web Development Education
+# AGENT CONFIGURATION v3
+# Posts per day: 3
+#   - 9AM  → Web Dev (developer teaching style)
+#   - 2PM  → Sports Top Story #1 (Malayalam news reader)
+#   - 8PM  → Sports Top Story #2 (Malayalam news reader)
+# + Real-time match watcher every 15 mins
 # =====================================================
 
 AGENT_CONFIG = {
 
     # ── ACCOUNT IDENTITY ──────────────────────────────
-    "account_niche": "Web Development Education",
+    "account_niche": "Web Development Education + Sports News",
 
     "account_description": (
         "A web development education page that teaches everything "
-        "from absolute HTML basics to advanced full-stack concepts. "
-        "Daily tips, tutorials, and insights for beginners and "
-        "experienced developers alike."
+        "from HTML basics to advanced full-stack concepts. "
+        "Also covers the most important sports news of the day — "
+        "cricket, football, and more — curated for an Indian audience."
     ),
 
     "target_audience": (
         "Beginner to intermediate developers, CS students, "
-        "self-taught coders, and tech career switchers aged 16-35"
+        "self-taught coders, and tech career switchers aged 16-35. "
+        "Also sports fans across India, especially cricket and ISL followers."
     ),
 
+    # Web dev posts use this voice
     "brand_voice": (
         "Friendly, clear, and encouraging — like a senior developer "
         "mentoring a junior. Simple language, practical examples, "
@@ -27,15 +34,51 @@ AGENT_CONFIG = {
     ),
 
     # ── POSTING SCHEDULE ──────────────────────────────
-   "post_times": [
-    {"label": "morning", "hour": 9, "minute": 0},
-    {"label": "test_1305", "hour": 13, "minute": 10},# ✅ TEST
-    {"label": "evening", "hour": 21, "minute": 0},
-],
+    "post_times": [
+        {
+            "label":        "morning_webdev",
+            "hour":         9,
+            "minute":       0,
+            "content_type": "webdev",
+        },
+        {
+            "label":        "afternoon_sports",
+            "hour":         14,
+            "minute":       0,
+            "content_type": "sports",
+            "story_slot":   1,   # highest scored unposted story
+        },
+        {
+            "label":        "evening_sports",
+            "hour":         20,
+            "minute":       0,
+            "content_type": "sports",
+            "story_slot":   2,   # second highest scored unposted story
+        },
+    ],
     "timezone": "Asia/Kolkata",
 
-    # ── CONTENT THEMES ────────────────────────────────
-    # Ordered ground-up: basics → intermediate → advanced
+    # ── SEASON AWARENESS ──────────────────────────────
+    # Controls which sport gets priority in scoring.
+    # Checked by sports_fetcher.py at runtime using current month.
+    "sport_seasons": {
+        # month (1-12): {"cricket": priority, "football": priority}
+        # Lower number = higher priority
+        1:  {"cricket": 5, "football": 6},   # Jan: Rabi/tests, ISL active
+        2:  {"cricket": 5, "football": 6},   # Feb: Tests/ODIs
+        3:  {"cricket": 4, "football": 7},   # Mar: Champions Trophy / ODI season
+        4:  {"cricket": 1, "football": 8},   # Apr: IPL starts 🔥
+        5:  {"cricket": 1, "football": 8},   # May: IPL peak 🔥
+        6:  {"cricket": 3, "football": 7},   # Jun: ICC events possible
+        7:  {"cricket": 3, "football": 7},   # Jul: England tours etc.
+        8:  {"cricket": 4, "football": 6},   # Aug: Asia Cup possible
+        9:  {"cricket": 4, "football": 5},   # Sep: ODI/T20 series
+        10: {"cricket": 5, "football": 3},   # Oct: ISL starts 🔥
+        11: {"cricket": 5, "football": 2},   # Nov: ISL peak 🔥
+        12: {"cricket": 5, "football": 2},   # Dec: ISL + Tests
+    },
+
+    # ── WEB DEV THEMES ────────────────────────────────
     "themes": [
         # Basics
         "How HTML works — the skeleton of every website",
@@ -48,7 +91,6 @@ AGENT_CONFIG = {
         "CSS Grid layout — the most powerful layout tool",
         "JavaScript variables, data types and functions basics",
         "How the internet works — HTTP, DNS and browsers explained",
-
         # Intermediate
         "Responsive design — making websites work on all screens",
         "JavaScript ES6 features every developer should know",
@@ -60,7 +102,6 @@ AGENT_CONFIG = {
         "Node.js explained — JavaScript on the server side",
         "How to use browser DevTools like a pro",
         "Understanding RESTful APIs and JSON data",
-
         # Advanced
         "TypeScript — why you should stop writing plain JavaScript",
         "Next.js and server-side rendering explained",
@@ -74,12 +115,131 @@ AGENT_CONFIG = {
         "System design basics every senior developer must know",
     ],
 
-    # ── CAPTION STYLE ─────────────────────────────────
+    # ══════════════════════════════════════════════════
+    #  SPORTS CONFIG
+    # ══════════════════════════════════════════════════
+    "sports": {
+
+        "max_news_age_hours":               24,
+        "cooldown_hours":                   3,
+        "realtime_check_interval_minutes":  15,
+
+        # Minimum relevance score to trigger a real-time post
+        # (prevents low-quality articles from posting outside schedule)
+        "realtime_score_threshold":         65,
+
+        # India-specific keyword boost (used in scorer)
+        "india_keywords": [
+            "india", "indian", "bcci", "ipl", "team india",
+            "virat", "kohli", "rohit", "sharma", "bumrah",
+            "hardik", "pandya", "dhoni", "shubman", "gill",
+            "isl", "indian super league", "chennaiyin", "mohun bagan",
+            "mumbai city", "bengaluru fc", "kerala blasters",
+            "champions trophy", "asia cup", "t20 world cup",
+        ],
+
+        # ── Caption style ──────────────────────────────
+        "caption_style": {
+            "tone":           "Breaking news — urgent, factual, exciting",
+            "length":         "short",
+            "use_emojis":     True,
+            "emoji_count":    "3-4",
+            "call_to_action": True,
+            "cta_examples": [
+                "Follow for live sports updates! 🔴",
+                "Save this post! 🔖",
+                "Tag a fan! 🏆",
+                "Comment your reaction! 👇",
+                "Share the news! 📢",
+            ]
+        },
+
+        # ── Hashtags ───────────────────────────────────
+        "hashtags": {
+            "count": 15,
+            "fixed": [
+                "#Cricket", "#IndianSports", "#SportNews",
+                "#BreakingNews", "#SportsUpdate",
+            ],
+            "variable": [
+                "#ICC", "#BCCI", "#IPL", "#IPL2025",
+                "#T20", "#T20WorldCup", "#ChampionsTrophy",
+                "#TeamIndia", "#IndianCricketTeam",
+                "#ISL", "#IndianSuperLeague", "#KeralaBlasters",
+                "#UEFA", "#FIFA", "#PremierLeague",
+                "#MatchDay", "#CricketFans", "#FootballFans",
+                "#LiveCricket", "#CricketHighlights",
+                "#SportsFan", "#Football",
+            ]
+        },
+
+        # ── Image style for generated slides ───────────
+        "image_style": {
+            "aesthetic": "professional sports broadcast graphic, breaking news style",
+            "colors":    "deep navy background, bold gold and white text, red breaking-news accent bar",
+            "mood":      "urgent, high-energy, professional broadcast",
+            "elements": (
+                "bold headline text centered, "
+                "score or key stat highlighted in large font, "
+                "clean modern sans-serif typography, "
+                "subtle stadium crowd blur in background, "
+                "thin red ticker bar at bottom with source name, "
+                "no real people faces, no club/board logos, no copyrighted imagery"
+            )
+        },
+
+        # ── 8-Slide carousel config ────────────────────
+        "carousel": {
+            "total_slides": 8,
+            "slide_plan": [
+                # slot: what each slide should contain
+                # type: "generated" = NVIDIA/HF | "scraped" = og:image from web | "stat_card" = generated text graphic
+                {"slot": 1, "role": "headline_card",  "type": "generated",  "desc": "Breaking news headline with score/result"},
+                {"slot": 2, "role": "main_photo",     "type": "scraped",    "desc": "Main match photo from primary source"},
+                {"slot": 3, "role": "action_photo",   "type": "scraped",    "desc": "Action photo from secondary source"},
+                {"slot": 4, "role": "reaction_photo", "type": "scraped",    "desc": "Celebration/reaction photo from third source"},
+                {"slot": 5, "role": "context_photo",  "type": "scraped",    "desc": "Pre-match or squad photo from fourth source"},
+                {"slot": 6, "role": "key_stat_1",     "type": "stat_card",  "desc": "Top player performance stat"},
+                {"slot": 7, "role": "key_stat_2",     "type": "stat_card",  "desc": "Match summary / result card"},
+                {"slot": 8, "role": "outro_card",     "type": "generated",  "desc": "Follow us CTA card with branding"},
+            ],
+            # If scraped image fails → try NVIDIA → if NVIDIA fails → try HuggingFace
+            "image_fallback_order": ["scrape", "nvidia", "huggingface"],
+        },
+
+        # ── Voice — Malayalam News Reader Style ────────
+        # Changed from "teaching" to "news broadcast" style
+        "voice": {
+            "tts_voice": "ml-IN-MidhunNeural",
+            "script_style": (
+                "Professional Malayalam news anchor / sports news reader. "
+                "Authoritative, clear, and fast-paced like a TV news broadcast. "
+                "Reads like a breaking news bulletin — not a conversation. "
+                "Structure: [Opening hook] → [What happened] → [Key stats/score] → [Significance for India] → [Closing line]. "
+                "Uses formal Malayalam (like Asianet/Manorama news style). "
+                "Player names, team names, and scores stay in English. "
+                "No filler words. No 'um' or 'so'. Confident and direct."
+            ),
+            "script_length":  "55-65 seconds when spoken (about 110-130 words)",
+            "script_example": (
+                "ഇന്ത്യ ഓസ്‌ട്രേലിയയെ 6 വിക്കറ്റിന് തോൽപ്പിച്ചു. "
+                "Rohit Sharma-യുടെ നേതൃത്വത്തിൽ Team India Champions Trophy final ജയിച്ചു. "
+                "Virat Kohli 87 റൺസ് നേടി Man of the Match ആയി. "
+                "ഇത് India-യുടെ ഈ ടൂർണമെന്റിലെ മൂന്നാം കിരീടം. "
+                "Sports update-കൾക്ക് follow ചെയ്യൂ."
+            ),
+        }
+    },
+
+    # ══════════════════════════════════════════════════
+    #  WEB DEV CONFIG (unchanged — developer teaching style)
+    # ══════════════════════════════════════════════════
+
     "caption_style": {
-        "tone": "Educational, encouraging, and practical",
-        "length": "short",
-        "use_emojis": True,
-        "emoji_count": "2-3",
+        "tone":           "Educational, encouraging, and practical",
+        "length":         "short",
+        "use_emojis":     True,
+        "emoji_count":    "2-3",
         "call_to_action": True,
         "cta_examples": [
             "Follow to learn web dev from scratch! 💻",
@@ -91,12 +251,11 @@ AGENT_CONFIG = {
         ]
     },
 
-    # ── HASHTAG STRATEGY ──────────────────────────────
     "hashtags": {
         "count": 12,
         "fixed": [
             "#WebDevelopment", "#Coding", "#Programming",
-            "#LearnToCode", "#WebDev"
+            "#LearnToCode", "#WebDev",
         ],
         "variable": [
             "#HTML", "#CSS", "#JavaScript", "#Python",
@@ -105,33 +264,40 @@ AGENT_CONFIG = {
             "#CodeNewbie", "#TechEducation", "#100DaysOfCode",
             "#OpenSource", "#GitHub", "#API", "#NextJS",
             "#TypeScript", "#DevTips", "#CodingLife",
-            "#SoftwareDeveloper", "#TechCareer", "#CodeDaily"
+            "#SoftwareDeveloper", "#TechCareer", "#CodeDaily",
         ]
     },
 
-    # ── IMAGE STYLE ───────────────────────────────────
     "image_style": {
-    "aesthetic": "ultra clean dark mode code editor, professional developer workspace",
-    "colors": "pure black background, electric blue syntax highlighting, white clean text, subtle purple accents",
-    "mood": "focused, professional, modern developer aesthetic",
-    "elements": (
-        "clean readable code snippet centered on screen, "
-        "VS Code dark theme interface, "
-        "single focused concept shown in code, "
-        "subtle grid lines, minimal design, "
-        "no clutter, no people, no logos"
-    )
-},
+        "aesthetic": "ultra clean dark mode code editor, professional developer workspace",
+        "colors":    "pure black background, electric blue syntax highlighting, white clean text, subtle purple accents",
+        "mood":      "focused, professional, modern developer aesthetic",
+        "elements": (
+            "clean readable code snippet centered on screen, "
+            "VS Code dark theme interface, "
+            "single focused concept shown in code, "
+            "subtle grid lines, minimal design, "
+            "no clutter, no people, no logos"
+        )
+    },
 
-    # ── VOICEOVER STYLE ───────────────────────────────
-   "voice": {
-    "tts_voice": "ml-IN-MidhunNeural",  # ← Malayalam male voice
-    "script_style": (
-        "Passionate Malayalam coding teacher. "
-        "Warm, clear, encouraging in Malayalam. "
-        "Explains coding concepts in simple Malayalam words. "
-        "Uses English technical terms but explains in Malayalam."
-    ),
-    "script_length": "70-80 seconds when spoken (about 140-160 words)"
-},
+    # Web dev voice — teaching style (unchanged)
+    "voice": {
+        "tts_voice": "ml-IN-MidhunNeural",
+        "script_style": (
+            "Passionate Malayalam coding teacher. "
+            "Warm, clear, encouraging — like a knowledgeable friend explaining a concept. "
+            "Structure: [Relatable hook] → [What it is, simply] → [Why it matters] → [Quick example] → [Encouragement + CTA]. "
+            "Uses conversational Malayalam. "
+            "English technical terms stay in English but are explained in Malayalam. "
+            "Friendly tone — not formal, not stiff."
+        ),
+        "script_length":  "70-80 seconds when spoken (about 140-160 words)",
+        "script_example": (
+            "CSS Flexbox അറിയാതെ developer ആകാൻ പറ്റില്ല. "
+            "ഒരു row-ൽ elements arrange ചെയ്യണോ? justify-content: center മതി. "
+            "ഇത് ഒരു line of code — പക്ഷേ hours of frustration save ചെയ്യും. "
+            "Save ചെയ്ത് practice ചെയ്തോളൂ. Follow for more! 💻"
+        ),
+    },
 }
