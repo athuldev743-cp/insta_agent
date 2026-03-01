@@ -27,10 +27,11 @@ AGENT_CONFIG = {
     ),
 
     # ── POSTING SCHEDULE ──────────────────────────────
-    "post_times": [
-        {"hour": 9,  "minute": 0,  "label": "morning"},
-        {"hour": 21, "minute": 0,  "label": "evening"},
-    ],
+   "post_times": [
+    {"label": "morning", "hour": 9, "minute": 0},
+    {"label": "test_1305", "hour": 13, "minute": 10},# ✅ TEST
+    {"label": "evening", "hour": 21, "minute": 0},
+],
     "timezone": "Asia/Kolkata",
 
     # ── CONTENT THEMES ────────────────────────────────
@@ -124,12 +125,13 @@ AGENT_CONFIG = {
 
     # ── VOICEOVER STYLE ───────────────────────────────
    "voice": {
-    "tts_voice": "en-US-AriaNeural",
+    "tts_voice": "ml-IN-MidhunNeural",  # ← Malayalam male voice
     "script_style": (
-        "Friendly coding teacher explaining one concept clearly. "
-        "Like a YouTube tutorial — warm, simple, encouraging. "
-        "Uses short sentences. Pauses naturally."
+        "Passionate Malayalam coding teacher. "
+        "Warm, clear, encouraging in Malayalam. "
+        "Explains coding concepts in simple Malayalam words. "
+        "Uses English technical terms but explains in Malayalam."
     ),
-    "script_length": "25-30 seconds when spoken (about 60-70 words)"  # ← increased
+    "script_length": "70-80 seconds when spoken (about 140-160 words)"
 },
 }
