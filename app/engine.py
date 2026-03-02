@@ -3,17 +3,21 @@ import asyncio
 import random
 import shutil
 import base64
+import csv
+import re
 from io import BytesIO
 from pathlib import Path
-
+import unicodedata
 import ffmpeg
 import edge_tts
 import requests
-from moviepy.editor import (
-    ImageClip, concatenate_videoclips,
-    AudioFileClip, CompositeVideoClip,
-    vfx,
-)
+# moviepy import patched below
+from PIL import Image as _PilImg
+_PilImg.ANTIALIAS = getattr(_PilImg, "ANTIALIAS", _PilImg.LANCZOS)
+try:
+    from moviepy import ImageClip, concatenate_videoclips, AudioFileClip, CompositeVideoClip
+except ImportError:
+    from moviepy import ImageClip, concatenate_videoclips, AudioFileClip, CompositeVideoClip
 from openai import OpenAI
 from dotenv import load_dotenv
 from huggingface_hub import InferenceClient
@@ -28,6 +32,7 @@ from app.sports_fetcher import (
 )
 
 load_dotenv()
+
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -136,155 +141,189 @@ def _generate_single_image(prompt: str, filename: str) -> str:
 # ─────────────────────────────────────────────────────────────
 # TEXT GENERATION — WEBDEV (unchanged)
 # ─────────────────────────────────────────────────────────────
-def build_hashtags(cfg: dict = None) -> str:
+def build_hashtags(cfg: dict | None = None) -> str:
+    """
+    Supports 2 config shapes:
+    1) cfg["hashtags"] = {"fixed": [...], "variable": [...], "count": N}
+    2) cfg itself has {"fixed": [...], "variable": [...], "count": N}
+    """
     if cfg is None:
         cfg = AGENT_CONFIG
-    fixed    = cfg["hashtags"]["fixed"]
-    variable = cfg["hashtags"]["variable"]
-    count    = cfg["hashtags"]["count"]
-    picked   = random.sample(variable, min(count - len(fixed), len(variable)))
+
+    tag_cfg = cfg.get("hashtags", cfg)  # fallback to cfg itself
+
+    fixed = tag_cfg.get("fixed", [])
+    variable = tag_cfg.get("variable", [])
+    count = int(tag_cfg.get("count", len(fixed)))
+
+    if not fixed and not variable:
+        return ""  # no hashtags configured
+
+    need = max(0, count - len(fixed))
+    picked = random.sample(variable, min(need, len(variable)))
     return " ".join(fixed + picked)
 
 
 async def generate_content(theme: str) -> dict:
+    is_sports = is_sports_theme(theme)
+    sport_data = parse_sports_theme(theme) if is_sports else {}
+    cfg = AGENT_CONFIG
+    
+    # ── THE ABSOLUTE TRANSLATION RULE ──
+    # This prevents the "West Indies" stumbling issue at the source.
+    transliteration_rules = """
+    STRICT SCRIPT RULES (LINE 2):
+    1. ZERO ENGLISH ALPHABETS: Every single word must be in Malayalam script. 
+       If a name is English, write its Malayalam sound (e.g., 'West Indies' -> 'വെസ്റ്റ് ഇൻഡീസ്').
+    2. PHONETIC ACCURACY: Use the spelling common in Kerala news (e.g., 'Messi' -> 'മെസ്സി').
+    3. NUMBERS: Write scores/numbers as Malayalam words (e.g., '10' -> 'പത്ത്').
+    4. NO ABBREVIATIONS: Write 'IPL' as 'ഐ പി എൽ'.
     """
-    Generates caption + voice script.
-    Automatically switches prompts/config for sports vs webdev themes.
-    """
-    is_sports   = is_sports_theme(theme)
-    sport_data  = parse_sports_theme(theme) if is_sports else {}
-    cfg         = AGENT_CONFIG
-    sports_cfg  = cfg["sports"]
 
     if is_sports:
-        cap_style = sports_cfg["caption_style"]
-        hashtags  = build_hashtags(sports_cfg)
-        cta       = random.choice(cap_style["cta_examples"])
-        voice_cfg = sports_cfg["voice"]
-        title     = sport_data.get("title", theme)
-        summary   = sport_data.get("summary", "")
-        source    = sport_data.get("source", "")
-        region    = sport_data.get("region", "")
-
+        sports_cfg = cfg["sports"]
+        hashtags = build_hashtags(sports_cfg)
         prompt = f"""
-You manage a sports Instagram account for an Indian audience.
-
-News headline: "{title}"
-Details: {summary}
-Source: {source} | Region: {region}
-
-Generate exactly 2 lines:
-
-LINE 1 (Caption): {cap_style['tone']} Instagram caption.
-  - Hook in first 5 words (urgent, exciting)
-  - Use {cap_style['emoji_count']} emojis naturally
-  - End with: "{cta}"
-  - Add hashtags: {hashtags}
-
-LINE 2 (Voiceover): Malayalam sports news bulletin script.
-  - Style: {voice_cfg['script_style']}
-  - Length: {voice_cfg['script_length']}
-  - Example style: {voice_cfg.get('script_example', '')}
-  - Structure: [Breaking hook 5s] → [What happened 20s] → [Key stats/score 15s] → [India significance 10s] → [Closing 5s]
-  - Player/team names and scores stay in English
-  - Formal news Malayalam (Asianet/Manorama style), NOT conversational
-  - No hashtags, no emojis, no labels
-
-Output ONLY 2 lines. No labels, no extra text.
+You are a Malayalam sports anchor. 
+Headline: "{sport_data.get('title', theme)}"
+{transliteration_rules}
+Generate 2 lines:
+LINE 1: Instagram Caption + {hashtags}
+LINE 2: High-energy news script ENTIRELY in Malayalam script.
 """
     else:
-        cap_style = cfg["caption_style"]
-        hashtags  = build_hashtags(cfg)
-        cta       = random.choice(cap_style["cta_examples"])
-        voice_cfg = cfg["voice"]
-
+        hashtags = build_hashtags(cfg)
         prompt = f"""
-You manage an Instagram account with these details:
-- Niche: {cfg['account_niche']}
-- Description: {cfg['account_description']}
-- Target Audience: {cfg['target_audience']}
-- Brand Voice: {cfg['brand_voice']}
-
-Today's theme: "{theme}"
-
-Generate exactly 2 lines:
-
-LINE 1 (Caption): {cap_style['tone']} caption.
-  - Hook in first 5 words to stop scrolling
-  - Use {cap_style['emoji_count']} emojis naturally placed
-  - End with this CTA: "{cta}"
-  - Then add these hashtags: {hashtags}
-
-LINE 2 (Voiceover): Detailed educational script IN MALAYALAM.
-  - Write ENTIRELY in Malayalam language
-  - Use English ONLY for technical terms (HTML, CSS, JavaScript, etc.)
-  - Length: {voice_cfg['script_length']}
-  - Style: {voice_cfg['script_style']}
-  - Example style: {voice_cfg.get('script_example', '')}
-  - Structure:
-    * Hook (5s): Surprising fact or question about {theme} in Malayalam
-    * Explain (25s): What it is and why it matters, in Malayalam
-    * Example (20s): Simple real code or real world example with Malayalam explanation
-    * Pro tip (15s): One expert tip beginners don't know, in Malayalam
-    * Takeaway (10s): Key thing to remember, in Malayalam
-    * CTA (5s): Encourage to follow for more, in Malayalam
-  - Use simple everyday Malayalam words
-  - Add natural commas for breathing pauses
-  - Sound like a passionate Kerala YouTube coding teacher
-  - No hashtags, no emojis, no labels
-
-Output ONLY these 2 lines. No labels, no extra text.
+You are a Malayalam coding teacher.
+Topic: "{theme}"
+{transliteration_rules}
+Generate 2 lines:
+LINE 1: Helpful Caption + {hashtags}
+LINE 2: Educational script ENTIRELY in Malayalam script.
 """
 
-    print(f"[ENGINE] Generating content ({'sports' if is_sports else 'webdev'}): {theme[:60]}", flush=True)
+    print(f"[ENGINE] 🔄 Step 1: Requesting 100% Transliterated Script...", flush=True)
 
-    client = OpenAI(
-        api_key=os.getenv("OPENROUTER_API_KEY"),
-        base_url="https://openrouter.ai/api/v1"
-    )
+    client = OpenAI(api_key=os.getenv("OPENROUTER_API_KEY"), base_url="https://openrouter.ai/api/v1")
     response = client.chat.completions.create(
         model="openrouter/auto",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=700,
+        max_tokens=800,
     )
-    lines        = response.choices[0].message.content.strip().split("\n", 1)
-    caption      = lines[0].strip()
+    
+    lines = response.choices[0].message.content.strip().split("\n", 1)
+    caption = lines[0].strip()
+    # The "Clean" script that goes to the Voice engine
     voice_script = lines[1].strip() if len(lines) > 1 else caption
+    caption = re.sub(r"^\s*LINE\s*1\s*:\s*", "", caption, flags=re.I).strip()
+    voice_script = re.sub(r"^\s*LINE\s*2\s*:\s*", "", voice_script, flags=re.I).strip()
 
-    print(f"[ENGINE] ✅ Caption: {caption[:80]}", flush=True)
-    print(f"[ENGINE] ✅ Script words: {len(voice_script.split())}", flush=True)
     return {"caption": caption, "voice_script": voice_script}
-
-
 # ─────────────────────────────────────────────────────────────
 # MALAYALAM PREPROCESSOR (unchanged)
 # ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# PHONETIC PREPROCESSOR SETUP
+# ─────────────────────────────────────────────────────────────
+
+CSV_REPLACEMENTS = {}
+PATTERN = None
+
+def _debug_script(script: str):
+    latin = re.findall(r"[A-Za-z]", script)
+    if latin:
+        print("[TTS DEBUG] ❌ Latin letters still present:", "".join(sorted(set(latin))))
+        for m in re.finditer(r".{0,20}[A-Za-z].{0,20}", script):
+            print("[TTS DEBUG] context:", m.group(0))
+    else:
+        print("[TTS DEBUG] ✅ No Latin letters found.")
+
+    # Detect weird whitespace (tabs, non-breaking spaces, zero-width)
+    weird = [ch for ch in script if ch in ("\u200b", "\u200c", "\u200d", "\ufeff", "\u00a0", "\t")]
+    if weird:
+        print("[TTS DEBUG] ⚠️ Weird whitespace codepoints:", [hex(ord(c)) for c in weird])
+
+    # Detect spaced-out Malayalam initials (common reason for spelling)
+    if re.search(r"[\u0D00-\u0D7F]\s+[\u0D00-\u0D7F]\s+[\u0D00-\u0D7F]", script):
+        print("[TTS DEBUG] ⚠️ Malayalam letters separated by spaces detected (may cause spelling).")
+
+    print("[TTS DEBUG] script preview:", script[:300].replace("\n", " ⏎ "))
+
+    if re.search(r"[\u0D00-\u0D7F]\s+[\u0D00-\u0D7F]\s+[\u0D00-\u0D7F]", script):
+     print("[TTS DEBUG] ⚠️ Spaced Malayalam initials detected (may sound like spelling).")
+
+def init_preprocessor():
+    global CSV_REPLACEMENTS, PATTERN
+
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(current_dir, "replacements.csv")
+
+    if not os.path.exists(file_path):
+        print(f"[PREPROCESSOR] ⚠️ Warning: {file_path} not found.")
+        return
+
+    try:
+        with open(file_path, mode="r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            data = sorted(list(reader), key=lambda x: len(x["english"]), reverse=True)
+            CSV_REPLACEMENTS = {
+                row["english"]: row["malayalam"]
+                for row in data
+                if row.get("english") and row.get("malayalam")
+            }
+
+        if CSV_REPLACEMENTS:
+            # Match phrases even with punctuation nearby. No \b.
+            # We still escape keys, and we sort longest-first already.
+            pattern_str = "|".join(re.escape(k) for k in CSV_REPLACEMENTS.keys())
+            PATTERN = re.compile(pattern_str, re.IGNORECASE)
+            print(f"[PREPROCESSOR] 🎯 Loaded {len(CSV_REPLACEMENTS)} rules from {file_path}")
+    except Exception as e:
+        print(f"[PREPROCESSOR] ❌ Error loading CSV: {e}")
+
+
+init_preprocessor()
+
 def preprocess_malayalam_script(script: str) -> str:
-    replacements = {
-        "HTML": "എച്ച് ടി എം എൽ", "CSS": "സി എസ് എസ്",
-        "JavaScript": "ജാവാസ്ക്രിപ്റ്റ്", "Python": "പൈത്തൺ",
-        "React": "റിയാക്റ്റ്", "Node.js": "നോഡ് ജെ എസ്",
-        "API": "എ പി ഐ", "SQL": "എസ് ക്യൂ എൽ",
-        "JSON": "ജെ സൺ", "Git": "ഗിറ്റ്", "GitHub": "ഗിറ്റ്ഹബ്",
-        "VS Code": "വി എസ് കോഡ്", "UI": "യൂ ഐ", "UX": "യൂ എക്സ്",
-        "URL": "യൂ ആർ എൽ", "HTTP": "എച്ച് ടി ടി പി",
-        "HTTPS": "എച്ച് ടി ടി പി എസ്", "DOM": "ഡോം",
-        "TypeScript": "ടൈപ്പ്സ്ക്രിപ്റ്റ്", "MongoDB": "മോംഗോ ഡി ബി",
-        "MySQL": "മൈ എസ് ക്യൂ എൽ", "Firebase": "ഫയർബേസ്",
-        "Bootstrap": "ബൂട്ട്സ്ട്രാപ്പ്", "flexbox": "ഫ്ലെക്സ്ബോക്സ്",
-        "Flexbox": "ഫ്ലെക്സ്ബോക്സ്", "frontend": "ഫ്രണ്ട്എൻഡ്",
-        "Frontend": "ഫ്രണ്ട്എൻഡ്", "backend": "ബാക്ക്എൻഡ്",
-        "Backend": "ബാക്ക്എൻഡ്", "developer": "ഡെവലപ്പർ",
-        "Developer": "ഡെവലപ്പർ", "function": "ഫങ്ഷൻ",
-        "variable": "വേരിയബിൾ", "array": "അറേ", "loop": "ലൂപ്പ്",
-        "class": "ക്ലാസ്സ്", "object": "ഒബ്ജക്റ്റ്",
-        "server": "സെർവർ", "database": "ഡേറ്റാബേസ്",
-        "website": "വെബ്സൈറ്റ്", "browser": "ബ്രൗസർ",
-        "code": "കോഡ്", "Code": "കോഡ്", "coding": "കോഡിംഗ്",
-        "programming": "പ്രോഗ്രാമിംഗ്",
-    }
-    for eng, mal in replacements.items():
-        script = script.replace(eng, mal)
+    # Normalize
+    script = unicodedata.normalize("NFC", script)
+
+    # 0) Remove invisible junk early (always)
+    script = re.sub(r"[\u200b\u200c\u200d\ufeff\u00a0]", " ", script)
+
+    # 1) Apply CSV replacements (always)
+    if PATTERN:
+        def repl(m):
+            s = m.group(0)
+            return (
+                CSV_REPLACEMENTS.get(s)
+                or CSV_REPLACEMENTS.get(s.title())
+                or CSV_REPLACEMENTS.get(s.upper())
+                or CSV_REPLACEMENTS.get(s.lower())
+                or s
+            )
+        script = PATTERN.sub(repl, script)
+
+    # 2) Collapse spaced Malayalam abbreviations (always)
+    script = re.sub(r"\bഐ\s*പി\s*എൽ\b", "ഐപിഎൽ", script)
+    script = re.sub(r"\bഎ\s*ഐ\b", "എഐ", script)
+    script = re.sub(r"\bഎ\s*പി\s*ഐ\b", "എപിഐ", script)
+    script = re.sub(r"\bഎ\s*ൽ\s*എൽ\s*എം\b", "എൽഎൽഎം", script)
+    script = re.sub(r"\bഎ\s*ഐ\s*എം\s*എൽ\b", "എഐഎംഎൽ", script)
+
+    # Optional aggressive collapse (use only if needed)
+    # script = re.sub(r"(?<=\b[\u0D00-\u0D7F])\s+(?=[\u0D00-\u0D7F]\b)", "", script)
+
+    # 3) Strip leftover Latin tokens (only if still present)
+    if re.search(r"[A-Za-z]", script):
+        print("[PREPROCESSOR] ⚠️ Latin detected, stripping leftovers...")
+        script = re.sub(r"[A-Za-z0-9_./:#@-]+", "", script)
+
+    # 4) Pacing
+    script = script.replace(", ", ",   ").replace(". ", ".    ")
+
+    # Clean extra whitespace
+    script = re.sub(r"\s{2,}", " ", script).strip()
     return script
 
 
@@ -294,27 +333,32 @@ def preprocess_malayalam_script(script: str) -> str:
 async def generate_voice(script: str, is_sports: bool = False) -> str:
     print("[ENGINE] Generating voiceover...", flush=True)
 
-    # Sports uses same TTS voice — just skip the tech word replacements
-    if not is_sports:
-        script = preprocess_malayalam_script(script)
+    
 
-    voice      = AGENT_CONFIG["voice"]["tts_voice"]
+    script = preprocess_malayalam_script(script)
+    _debug_script(script)
+
+    if is_sports:
+        voice = AGENT_CONFIG["sports"]["voice"]["tts_voice"]
+        rate = "+15%" 
+        pitch = "+4Hz"
+    else:
+        voice = AGENT_CONFIG.get("voice", {}).get("tts_voice", "ml-IN-MidhunNeural")
+        rate = "-5%"
+        pitch = "+0Hz"
+
     audio_path = os.path.join(DATA_DIR, "temp_audio.mp3")
 
-    # Add natural pauses
-    script = (
-        script
-        .replace(". ", ".   ")
-        .replace("? ", "?   ")
-        .replace("! ", "!   ")
-        .replace(", ", ",  ")
+    communicate = edge_tts.Communicate(
+        script, 
+        voice, 
+        rate=rate, 
+        pitch=pitch, 
+        volume="+15%"
     )
-
-    communicate = edge_tts.Communicate(script, voice, rate="-10%", volume="+15%", pitch="+0Hz")
+    
     await communicate.save(audio_path)
-    print(f"[ENGINE] ✅ Audio: {audio_path}", flush=True)
     return audio_path
-
 
 # ─────────────────────────────────────────────────────────────
 # WEBDEV SLIDESHOW IMAGES (unchanged)
@@ -409,65 +453,56 @@ TRANSITION_EFFECTS = [
 
 
 def _moviepy_reel(image_paths: list[str], audio_path: str, output_path: str):
-    """
-    Build reel with MoviePy — used for sports posts.
-    Each slide gets a randomly chosen transition effect.
-    Total duration matches the audio.
-    """
-    audio        = AudioFileClip(audio_path)
-    total_dur    = audio.duration
-    slide_dur    = total_dur / len(image_paths)
-    transition   = 0.5   # seconds overlap for transitions
-    clips        = []
+    from moviepy import vfx
+
+    audio = AudioFileClip(audio_path)
+    total_dur = audio.duration  # Dynamic fix: matches Malayalam speech perfectly
+    
+    num_slides = len(image_paths)
+    slide_dur = total_dur / num_slides
+    overlap = 0.6  # Seconds for the transition overlap
+    
+    clips = []
 
     for i, img_path in enumerate(image_paths):
-        effect = random.choice(TRANSITION_EFFECTS)
-        clip   = (
+        # Create clip with extra time for the crossfade
+        clip = (
             ImageClip(img_path)
-            .set_duration(slide_dur)
-            .resize((1080, 1920))
+            .with_duration(slide_dur + overlap)
+            .resized((1080, 1920))
         )
 
-        # ── Apply transition effect ────────────────────────────────────
-        if effect == "fade":
-            clip = clip.fadein(transition).fadeout(transition)
-
-        elif effect == "zoom_in":
-            # Ken-Burns slow zoom: scale from 1.0 → 1.08 over slide duration
-            clip = clip.resize(lambda t: 1 + 0.08 * (t / slide_dur))
-
-        elif effect == "slide_left":
-            # Slide in from right edge
-            clip = clip.set_position(
-                lambda t: (max(0, int(1080 * (1 - t / transition))), 0)
-                if t < transition else (0, 0)
-            )
-
-        elif effect == "crossfade":
-            clip = clip.fadein(transition)
-
+        # ── ANIMATION: Slow Ken-Burns Zoom ──
+        # Starts at 1.0x and zooms to 1.1x over the duration
+        clip = clip.resized(lambda t: 1 + 0.1 * (t / (slide_dur + overlap)))
+        
+        # ── TRANSITION: Crossfade ──
+        if i > 0:
+            clip = clip.with_effects([vfx.FadeIn(overlap)])
+        
         clips.append(clip)
 
-    # Concatenate all clips
-    final_video = concatenate_videoclips(clips, method="compose", padding=-transition)
-    final_video = final_video.set_audio(audio).subclip(0, total_dur)
+    # Combine clips with negative padding to create the overlap
+    final_video = concatenate_videoclips(clips, method="compose", padding=-overlap)
 
-    print(f"[ENGINE] 🎬 MoviePy rendering {len(clips)} slides ({total_dur:.1f}s total)...", flush=True)
+    # Trim to match audio exactly
+    final_video = final_video.with_audio(audio).subclipped(0, total_dur)
+
+    print(f"[ENGINE] 🎬 Rendering Reel: {total_dur:.2f}s", flush=True)
+    
     final_video.write_videofile(
         output_path,
         fps=30,
         codec="libx264",
         audio_codec="aac",
-        bitrate="5000k",
-        audio_bitrate="192k",
-        preset="fast",
+        bitrate="6000k",
+        preset="medium",
         threads=4,
-        logger=None,   # suppress verbose moviepy output
+        logger=None
     )
+    
     final_video.close()
     audio.close()
-    print(f"[ENGINE] ✅ MoviePy reel: {output_path}", flush=True)
-
 
 def create_reel(image_paths, audio_path: str, use_moviepy: bool = False) -> str:
     """
@@ -531,50 +566,38 @@ def create_reel(image_paths, audio_path: str, use_moviepy: bool = False) -> str:
 # MASTER PIPELINE
 # ─────────────────────────────────────────────────────────────
 async def run_engine(theme: str) -> dict:
-    """
-    Full pipeline. Auto-detects webdev vs sports and routes accordingly.
-
-    WebDev:  generate all 8 images (NVIDIA/HF) → FFmpeg reel
-    Sports:  assemble_sports_slides (web scrape + PIL cards + NVIDIA/HF fallback)
-             → MoviePy reel with transitions
-    """
-    is_sports  = is_sports_theme(theme)
+    is_sports = is_sports_theme(theme)
     sport_data = parse_sports_theme(theme) if is_sports else {}
 
-    # ── Generate caption + voice script ───────────────────────────────────
+    # ── STEP 1: TRANSLATE & GENERATE SCRIPT ──
+    # We do this first so we have the pure Malayalam text ready.
     content = await generate_content(theme)
 
+    # ── STEP 2: GENERATE VOICE & IMAGES ──
     if is_sports:
-        # ── Sports branch ─────────────────────────────────────────────────
         from app.image_assembler import assemble_sports_slides
-
-        # Fetch all articles for multi-source image collection
         all_articles = fetch_all_sports_news(max_age_hours=24)
 
-        # Assemble 8 slides + generate voice in parallel
-        results = await asyncio.gather(
+        # Run Slide Assembly and Voice Generation
+        print(f"[ENGINE] 🎙️ Step 2: Generating Voice and 🖼️ Slides...", flush=True)
+        image_paths, audio_path = await asyncio.gather(
             assemble_sports_slides(sport_data, all_articles),
-            generate_voice(content["voice_script"], is_sports=True),
+            generate_voice(content["voice_script"], is_sports=True)
         )
-        image_paths = results[0]
-        audio_path  = results[1]
 
-        # MoviePy reel with smooth transitions for sports
+        # ── STEP 3: ASSEMBLE VIDEO (Using exact audio duration) ──
+        print(f"[ENGINE] 🎬 Step 3: Mastering Video to match Audio duration...", flush=True)
         video_path = create_reel(image_paths, audio_path, use_moviepy=True)
 
     else:
-        # ── WebDev branch (original behaviour — unchanged) ─────────────────
-        results = await asyncio.gather(
+        # WebDev Path
+        image_paths, audio_path = await asyncio.gather(
             generate_slideshow_images(theme, count=8),
-            generate_voice(content["voice_script"], is_sports=False),
+            generate_voice(content["voice_script"], is_sports=False)
         )
-        image_paths = results[0]
-        audio_path  = results[1]
-
-        # FFmpeg reel (original)
         video_path = create_reel(image_paths, audio_path, use_moviepy=False)
 
     return {
         "video_path": video_path,
-        "caption":    content["caption"],
+        "caption": content["caption"],
     }

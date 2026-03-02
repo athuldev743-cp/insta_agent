@@ -18,5 +18,6 @@ accelerate
 safetensors 
 apscheduler
 feedparser==6.0.11
-moviepy==1.0.3
+moviepy==2.1.1
 feedparser==6.0.11
+numpy
