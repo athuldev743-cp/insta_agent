@@ -144,19 +144,29 @@ async def startup():
 def health():
     return {"status": "healthy", "jobs": len(scheduler.get_jobs())}
 
+
 @app.post("/run-engine")
 async def trigger_engine(request: Request, background_tasks: BackgroundTasks):
-    """Triggered by QStash to wake up Render and start a post."""
     signature = request.headers.get("upstash-signature")
-    body = await request.body()
+    body_bytes = await request.body()
+    body_str = body_bytes.decode("utf-8")
     
-    # Security check (Skip locally)
-    if os.getenv("RENDER"):
+    # --- UPDATE THIS BLOCK ---
+    # Allow bypass if RENDER env var is not set OR if testing locally
+    is_render = os.getenv("RENDER") == "true"
+    
+    if is_render:
+        if not signature:
+            print("[SECURITY] Missing signature on Render - Rejecting")
+            raise HTTPException(status_code=401, detail="Unauthorized")
         try:
-            receiver.verify(body=body.decode(), signature=signature)
-        except:
-            raise HTTPException(status_code=401)
+            receiver.verify(body=body_str, signature=signature)
+        except Exception as e:
+            print(f"[SECURITY] Signature verification failed: {e}")
+            raise HTTPException(status_code=401, detail="Unauthorized")
+    else:
+        print("[DEBUG] Signature check bypassed (Local/Manual Test)")
+    # -------------------------
 
-    # Pick the top story (Slot 1) by default when triggered externally
     background_tasks.add_task(run_post_cycle_sync, story_slot=1)
-    return {"status": "Accepted", "message": "Engine starting..."}
+    return {"status": "accepted", "message": "Engine starting in background..."}
