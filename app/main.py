@@ -153,7 +153,7 @@ async def trigger_engine(request: Request, background_tasks: BackgroundTasks):
     
     # --- UPDATE THIS BLOCK ---
     # Allow bypass if RENDER env var is not set OR if testing locally
-    is_render = os.getenv("RENDER") == "true"
+    is_render = os.getenv("RENDER_APP_URL") == "true"
     
     if is_render:
         if not signature:
