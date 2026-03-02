@@ -21,3 +21,4 @@ feedparser==6.0.11
 moviepy==2.1.1
 feedparser==6.0.11
 numpy
+qstash
