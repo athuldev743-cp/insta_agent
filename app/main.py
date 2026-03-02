@@ -141,8 +141,30 @@ async def startup():
         print(f"[AGENT] ⚽ Sports Agent Live | {len(ALL_FEEDS)} Feeds active", flush=True)
 
 @app.get("/health")
-def health():
-    return {"status": "healthy", "jobs": len(scheduler.get_jobs())}
+async def health():
+    """Enhanced health check with scheduler status"""
+    return {
+        "status": "healthy",
+        "scheduler": {
+            "running": scheduler.running,
+            "jobs": len(scheduler.get_jobs()),
+            "job_details": [
+                {
+                    "id": job.id,
+                    "next_run": str(job.next_run_time) if job.next_run_time else None
+                }
+                for job in scheduler.get_jobs()
+            ]
+        },
+        "agent_state": {
+            "running": JOB_STATE.get("running", False),
+            "last_start": JOB_STATE.get("last_start"),
+            "last_end": JOB_STATE.get("last_end"),
+            "last_type": JOB_STATE.get("last_type"),
+            "last_theme": JOB_STATE.get("last_theme")
+        },
+        "timestamp": datetime.now(ZoneInfo(AGENT_CONFIG["timezone"])).isoformat()
+    }
 
 
 @app.post("/run-engine")
@@ -170,3 +192,23 @@ async def trigger_engine(request: Request, background_tasks: BackgroundTasks):
 
     background_tasks.add_task(run_post_cycle_sync, story_slot=1)
     return {"status": "accepted", "message": "Engine starting in background..."}
+
+
+
+@app.get("/")
+async def root():
+    """Root endpoint with service information"""
+    return {
+        "service": "Instagram Sports AI Agent",
+        "version": "4.0.0",
+        "status": "running",
+        "endpoints": {
+            "/health": "Health check endpoint",
+            "/run-engine": "Trigger the sports engine manually",
+        },
+        "feeds_active": len(ALL_FEEDS),
+        "scheduler_running": scheduler.running,
+        "last_run": JOB_STATE.get("last_end"),
+        "current_state": JOB_STATE.get("running", False)
+    }
+
