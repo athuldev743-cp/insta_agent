@@ -1,4 +1,5 @@
 import os
+import gc
 import asyncio
 import random
 import shutil
@@ -14,7 +15,7 @@ import requests
 from PIL import Image as _PilImg
 _PilImg.ANTIALIAS = getattr(_PilImg, "ANTIALIAS", _PilImg.LANCZOS)
 
-from moviepy import ImageClip, concatenate_videoclips, AudioFileClip, CompositeVideoClip
+from moviepy import ImageClip, concatenate_videoclips, AudioFileClip
 
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -84,7 +85,10 @@ def _generate_single_image_nvidia(prompt: str) -> Image.Image:
     r = requests.post(url, headers=headers, json={"prompt": prompt}, timeout=180)
     if r.status_code >= 400:
         raise RuntimeError(f"NVIDIA error {r.status_code}: {r.text[:400]}")
-    return _decode_image_from_response_json(r.json())
+    img = _decode_image_from_response_json(r.json())
+    del r
+    gc.collect()
+    return img
 
 
 # ─────────────────────────────────────────────────────────────
@@ -110,29 +114,42 @@ def _generate_single_image_hf(prompt: str) -> Image.Image:
             )
             if image.getbbox() is None:
                 raise ValueError("Blank image")
-            return image.convert("RGB")
+            result = image.convert("RGB")
+            del image
+            gc.collect()
+            return result
         except Exception as e:
             last_error = e
             print(f"[HF] ⚠️ {provider} failed: {str(e)[:180]}", flush=True)
+            gc.collect()
     raise RuntimeError(f"All HF providers failed: {last_error}")
 
 
 def _generate_single_image(prompt: str, filename: str) -> str:
     out_path = os.path.join(DATA_DIR, filename)
+    img = None
     try:
         print(f"[IMG] NVIDIA → {filename}", flush=True)
         img = _generate_single_image_nvidia(prompt)
         img = enhance_image(img)
         img.save(out_path, format="JPEG", quality=95, optimize=True)
         print(f"[IMG] ✅ NVIDIA: {out_path}", flush=True)
-        return out_path
     except Exception as e:
         print(f"[IMG] ⚠️ NVIDIA failed ({filename}): {str(e)[:220]}", flush=True)
+        if img:
+            img.close()
+            del img
+            gc.collect()
         img = _generate_single_image_hf(prompt)
         img = enhance_image(img)
         img.save(out_path, format="JPEG", quality=95, optimize=True)
         print(f"[IMG] ✅ HF: {out_path}", flush=True)
-        return out_path
+    finally:
+        if img:
+            img.close()
+            del img
+        gc.collect()
+    return out_path
 
 
 # ─────────────────────────────────────────────────────────────
@@ -163,19 +180,14 @@ def clean_llm_output_line(text: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────
-# TEXT GENERATION  (patched — stronger transliteration rules)
+# TEXT GENERATION
 # ─────────────────────────────────────────────────────────────
 async def generate_content(theme: str) -> dict:
-    # Since we only want sports, we assume it's a sports theme or handle it as one
     sport_data = parse_sports_theme(theme)
-    cfg = AGENT_CONFIG
-    
-    # 1. Pull Sports-specific Config
+    cfg        = AGENT_CONFIG
     sports_cfg = cfg.get("sports", {})
     cap_cfg    = sports_cfg.get("caption_style", {})
     voice_cfg  = sports_cfg.get("voice", {})
-    
-    # 2. Setup dynamic elements
     hashtags   = build_hashtags(sports_cfg)
     cta        = random.choice(cap_cfg.get("cta_examples", ["Follow for more!"]))
     title      = sport_data.get("title", theme)
@@ -194,7 +206,6 @@ MANDATORY MALAYALAM SCRIPT RULES (voice script only):
 4. NO markdown, NO labels, NO emojis in script.
 """
 
-    # 3. Sports-only Prompt
     prompt = f"""You are a professional Malayalam sports news anchor for Instagram.
 
 News headline: "{title}"
@@ -222,17 +233,18 @@ Output ONLY 2 plain lines. No labels. No extra text. No markdown."""
         api_key=os.getenv("OPENROUTER_API_KEY"),
         base_url="https://openrouter.ai/api/v1",
     )
-    
     response = client.chat.completions.create(
         model="openrouter/auto",
         messages=[{"role": "user", "content": prompt}],
         max_tokens=800,
     )
-
-    # 4. Parse response
-    lines = response.choices[0].message.content.strip().split("\n", 1)
-    caption = clean_llm_output_line(lines[0].strip())
+    lines        = response.choices[0].message.content.strip().split("\n", 1)
+    caption      = clean_llm_output_line(lines[0].strip())
     voice_script = clean_llm_output_line(lines[1].strip() if len(lines) > 1 else caption)
+
+    # Free response from memory
+    del response, client
+    gc.collect()
 
     print(f"[ENGINE] ✅ Sports Caption: {caption[:80]}", flush=True)
     return {"caption": caption, "voice_script": voice_script}
@@ -287,47 +299,30 @@ init_preprocessor()
 
 
 # ─────────────────────────────────────────────────────────────
-# MALAYALAM PREPROCESSOR  (patched — fixed \b bug + abbreviation collapse)
+# MALAYALAM PREPROCESSOR
 # ─────────────────────────────────────────────────────────────
 def preprocess_malayalam_script(script: str) -> str:
-    # 1. Normalize unicode
     script = unicodedata.normalize("NFC", script)
-
-    # 2. Remove invisible characters
     script = re.sub(r"[\u200b\u200c\u200d\ufeff\u00a0]", " ", script)
-
-    # 3. Remove markdown
     script = re.sub(r"[*_`]+", "", script)
-
-    # 4. Strip LLM section headings
     script = re.sub(
         r"^\s*(വിദ്യാഭ്യാസപരമായ\s+സ്ക്രിപ്റ്റ്|വിദ്യാഭ്യാസ\s+സ്ക്രിപ്റ്റ്|"
         r"വാർത്ത|ന്യൂസ്|സ്ക്രിപ്റ്റ്)\s*:\s*",
         "", script, flags=re.IGNORECASE,
     )
-
-    # 5. Collapse spaced Malayalam abbreviations
-    # KEY FIX: \b doesn't work on Malayalam Unicode — using plain re.sub
-    # Convert all abbreviation forms → dot-separated letters
-    # "ഐ. പി. എൽ." makes Edge-TTS pronounce each letter fully (dot = pause + full vowel)
-    # Hyphen form clips "ഐ" → sounds like "a". Dot form preserves the diphthong → "eye"
     abbreviation_fixes = [
-        # Using "അയ്" (Ay) instead of "ഐ" (Ai) forces the "EYE" sound for IPL/ICC
-        (r"ഐ[\s\.\-]*പി[\s\.\-]*എൽ",      "അയ്പിഎൽ"),    # IPL -> Ay-pi-el
-        (r"ഐ[\s\.\-]*സി[\s\.\-]*സി",      "അയ്സിസി"),    # ICC -> Ay-si-si
-        (r"ഐ[\s\.\-]*എസ്[\s\.\-]*എൽ",     "അയ്എസ്എൽ"),   # ISL -> Ay-es-el
-        
-        # Standard News Transliterations
-        (r"ബി[\s\.\-]*സി[\s\.\-]*സി[\s\.\-]*ഐ", "ബിസിസിഐ"), 
+        (r"ഐ[\s\.\-]*പി[\s\.\-]*എൽ",      "അയ്പിഎൽ"),
+        (r"ഐ[\s\.\-]*സി[\s\.\-]*സി",      "അയ്സിസി"),
+        (r"ഐ[\s\.\-]*എസ്[\s\.\-]*എൽ",     "അയ്എസ്എൽ"),
+        (r"ബി[\s\.\-]*സി[\s\.\-]*സി[\s\.\-]*ഐ", "ബിസിസിഐ"),
         (r"ഒ[\s\.\-]*ഡി[\s\.\-]*ഐ",      "ഒഡിഐ"),
-        (r"എ[\s\.\-]*ഐ(?!\s*[എ-ഹ])",      "എഐ"),        
-        (r"എ[\s\.\-]*പി[\s\.\-]*ഐ",      "എപിഐ"),      
+        (r"എ[\s\.\-]*ഐ(?!\s*[എ-ഹ])",      "എഐ"),
+        (r"എ[\s\.\-]*പി[\s\.\-]*ഐ",      "എപിഐ"),
         (r"ടി[\s\.\-]*ട്വന്റി",           "ടി ട്വന്റി"),
     ]
     for pattern, replacement in abbreviation_fixes:
         script = re.sub(pattern, replacement, script)
 
-    # 6. Apply CSV replacements (English → Malayalam)
     if PATTERN:
         def repl(m):
             s = m.group(0)
@@ -340,9 +335,7 @@ def preprocess_malayalam_script(script: str) -> str:
             )
         script = PATTERN.sub(repl, script)
 
-    # 7. Malayalam TTS pronunciation substitutions
     tts_map = {
-        # Longer phrases first to avoid partial replacements
         "ഐ-പി-എൽ മാച്ച്":  "ഐ-പി-എൽ മത്സരം",
         "മാച്ച് വിശേഷങ്ങൾ": "മത്സര വിശേഷങ്ങൾ",
         "മാച്ച്":            "മത്സരം",
@@ -350,26 +343,15 @@ def preprocess_malayalam_script(script: str) -> str:
     for k, v in sorted(tts_map.items(), key=lambda x: -len(x[0])):
         script = script.replace(k, v)
 
-    # 8. Strip remaining Latin
     if re.search(r"[A-Za-z]", script):
         print("[PREPROCESSOR] ⚠️  Latin detected — stripping...", flush=True)
         script = re.sub(r"[A-Za-z0-9_./:#@-]+", "", script)
 
-    # 9. Collapse excessive whitespace
     script = re.sub(r"(?<=\S)\s{5,}(?=\S)", " ", script)
-
-    # 10. Tabs to spaces
     script = script.replace("\t", " ")
-
-    # Use only ONE extra space for a natural pause
     script = script.replace(", ", ", ").replace(". ", ".  ")
-
-    # 12. Remove leading junk
     script = re.sub(r"^[\W_]+", "", script).strip()
-
-    # 13. Collapse multiple newlines
     script = re.sub(r"\n{2,}", "\n", script)
-
     return script.strip()
 
 
@@ -378,31 +360,175 @@ def preprocess_malayalam_script(script: str) -> str:
 # ─────────────────────────────────────────────────────────────
 async def generate_voice(script: str, is_sports: bool = False) -> str:
     print("[ENGINE] Generating voiceover...", flush=True)
-
     script = preprocess_malayalam_script(script)
     _debug_script(script)
 
-    if is_sports:
-        voice = "ml-IN-MidhunNeural"
-        # REDUCED: From +15% to +8% for better readability
-        rate  = "+8%"  
-        pitch = "+2Hz"
-    else:
-        voice = "ml-IN-SobhanaNeural"
-        # REDUCED: From +5% to +2% for a natural teaching flow
-        rate  = "+2%"   
-        pitch = "+0Hz"
+    voice = "ml-IN-MidhunNeural"  if is_sports else "ml-IN-SobhanaNeural"
+    rate  = "+8%"                  if is_sports else "+2%"
+    pitch = "+2Hz"                 if is_sports else "+0Hz"
 
     audio_path  = os.path.join(DATA_DIR, "temp_audio.mp3")
-    # Higher volume helps clarity at higher speeds
     communicate = edge_tts.Communicate(script, voice, rate=rate, pitch=pitch, volume="+20%")
     await communicate.save(audio_path)
-    
+    del communicate
+    gc.collect()
+
     print(f"[ENGINE] ✅ Audio: {audio_path} at speed {rate}", flush=True)
     return audio_path
 
+
 # ─────────────────────────────────────────────────────────────
-# WEBDEV SLIDESHOW IMAGES
+# VIDEO CREATION  (memory-optimised MoviePy)
+# ─────────────────────────────────────────────────────────────
+def _moviepy_reel(image_paths: list[str], audio_path: str, output_path: str):
+    from moviepy import vfx
+
+    audio      = AudioFileClip(audio_path)
+    total_dur  = audio.duration
+    num_slides = len(image_paths)
+    slide_dur  = total_dur / num_slides
+    overlap    = 0.6
+
+    clips = []
+    for i, img_path in enumerate(image_paths):
+        clip = (
+            ImageClip(img_path)
+            .with_duration(slide_dur + overlap)
+            .resized((1080, 1920))
+        )
+        clip = clip.resized(lambda t: 1 + 0.1 * (t / (slide_dur + overlap)))
+        if i > 0:
+            clip = clip.with_effects([vfx.FadeIn(overlap)])
+        clips.append(clip)
+
+    final_video = concatenate_videoclips(clips, method="compose", padding=-overlap)
+    final_video = final_video.with_audio(audio).subclipped(0, total_dur)
+
+    print(f"[ENGINE] 🎬 Rendering: {total_dur:.2f}s", flush=True)
+    final_video.write_videofile(
+        output_path,
+        fps=30,
+        codec="libx264",
+        audio_codec="aac",
+        bitrate="4000k",       # ← reduced from 6000k to save RAM during encode
+        preset="ultrafast",    # ← ultrafast uses far less RAM than "medium"
+        threads=2,             # ← reduced from 4 to limit concurrent RAM use
+        logger=None,
+    )
+
+    # ── Free everything immediately after render ──
+    final_video.close()
+    audio.close()
+    for clip in clips:
+        clip.close()
+    del final_video, audio, clips
+    gc.collect()
+
+
+def create_reel(image_paths, audio_path: str, use_moviepy: bool = False) -> str:
+    output_path    = os.path.join(DATA_DIR, "reel.mp4")
+    slide_duration = 5
+
+    if isinstance(image_paths, str):
+        image_paths = [image_paths]
+
+    if use_moviepy:
+        _moviepy_reel(image_paths, audio_path, output_path)
+        return output_path
+
+    print("[ENGINE] Building reel with FFmpeg...", flush=True)
+    try:
+        if len(image_paths) == 1:
+            video_input  = ffmpeg.input(image_paths[0], loop=1, t=40, framerate=30)
+            video_scaled = (
+                video_input
+                .filter("scale", 1080, 1920, force_original_aspect_ratio="decrease")
+                .filter("pad",   1080, 1920, "(ow-iw)/2", "(oh-ih)/2", color="black")
+                .filter("setsar", "1/1")
+            )
+        else:
+            segments = []
+            for path in image_paths:
+                seg = (
+                    ffmpeg.input(path, loop=1, t=slide_duration, framerate=30)
+                    .filter("scale", 1080, 1920, force_original_aspect_ratio="decrease")
+                    .filter("pad",   1080, 1920, "(ow-iw)/2", "(oh-ih)/2", color="black")
+                    .filter("setsar", "1/1")
+                    .filter("fade", type="in",  start_time=0, duration=0.4)
+                    .filter("fade", type="out", start_time=slide_duration - 0.4, duration=0.4)
+                )
+                segments.append(seg)
+            video_scaled = ffmpeg.concat(*segments, v=1, a=0)
+
+        audio_input = ffmpeg.input(audio_path)
+        out = ffmpeg.output(
+            video_scaled, audio_input, output_path,
+            vcodec="libx264", acodec="aac", pix_fmt="yuv420p",
+            movflags="+faststart", r=30,
+            video_bitrate="4000k", audio_bitrate="192k",
+            shortest=None, **{"threads": "2", "preset": "ultrafast"},
+        )
+        ffmpeg.run(out, overwrite_output=True, quiet=False)
+        print(f"[ENGINE] ✅ FFmpeg reel: {output_path}", flush=True)
+        return output_path
+    except ffmpeg.Error as e:
+        print(f"[ENGINE] ❌ FFmpeg error: {e.stderr.decode()}", flush=True)
+        raise
+    finally:
+        gc.collect()
+
+
+# ─────────────────────────────────────────────────────────────
+# MASTER PIPELINE  (sequential to minimise peak RAM)
+# ─────────────────────────────────────────────────────────────
+async def run_engine(theme: str) -> dict:
+    is_sports  = is_sports_theme(theme)
+    sport_data = parse_sports_theme(theme) if is_sports else {}
+
+    # ── Step 1: Generate text content first (lightweight) ────────────────
+    content = await generate_content(theme)
+    gc.collect()
+
+    if is_sports:
+        from app.image_assembler import assemble_sports_slides
+        all_articles = fetch_all_sports_news(max_age_hours=24)
+
+        # ── Step 2: Generate audio first (small RAM footprint) ────────────
+        print(f"[ENGINE] 🎙️ Generating voice first...", flush=True)
+        audio_path = await generate_voice(content["voice_script"], is_sports=True)
+        gc.collect()
+
+        # ── Step 3: Generate slides after audio is done ───────────────────
+        print(f"[ENGINE] 🖼️ Generating slides...", flush=True)
+        image_paths = await assemble_sports_slides(sport_data, all_articles)
+
+        # ── Free articles list — no longer needed ─────────────────────────
+        del all_articles
+        gc.collect()
+
+    else:
+        audio_path, image_paths = await asyncio.gather(
+            generate_voice(content["voice_script"], is_sports=False),
+            generate_slideshow_images(theme, count=8),
+        )
+
+    # ── Step 4: Compose video ─────────────────────────────────────────────
+    print(f"[ENGINE] 🎬 Composing video...", flush=True)
+    video_path = create_reel(image_paths, audio_path, use_moviepy=True)
+
+    # ── Step 5: Clean up slide files from disk after video render ─────────
+    for p in image_paths:
+        try:
+            os.remove(p)
+        except Exception:
+            pass
+    gc.collect()
+
+    return {"video_path": video_path, "caption": content["caption"]}
+
+
+# ─────────────────────────────────────────────────────────────
+# WEBDEV SLIDESHOW (non-sports — unchanged logic, added gc)
 # ─────────────────────────────────────────────────────────────
 async def generate_slideshow_images(theme: str, count: int = 8) -> list:
     print(f"[ENGINE] Generating {count} webdev slides...", flush=True)
@@ -467,6 +593,7 @@ async def generate_slideshow_images(theme: str, count: int = 8) -> list:
         try:
             path = _generate_single_image(prompt, f"slide_{i+1}.jpg")
             image_paths.append(path)
+            gc.collect()  # free after each slide
         except Exception as e:
             print(f"[ENGINE] ⚠️ Slide {i+1} failed: {e}", flush=True)
             if image_paths:
@@ -478,123 +605,3 @@ async def generate_slideshow_images(theme: str, count: int = 8) -> list:
 
     print(f"[ENGINE] ✅ {len(image_paths)} webdev slides ready!", flush=True)
     return image_paths
-
-
-# ─────────────────────────────────────────────────────────────
-# VIDEO CREATION
-# ─────────────────────────────────────────────────────────────
-TRANSITION_EFFECTS = ["fade", "slide_left", "zoom_in", "crossfade"]
-
-
-def _moviepy_reel(image_paths: list[str], audio_path: str, output_path: str):
-    from moviepy import vfx
-
-    audio      = AudioFileClip(audio_path)
-    total_dur  = audio.duration
-    num_slides = len(image_paths)
-    slide_dur  = total_dur / num_slides
-    overlap    = 0.6
-
-    clips = []
-    for i, img_path in enumerate(image_paths):
-        clip = (
-            ImageClip(img_path)
-            .with_duration(slide_dur + overlap)
-            .resized((1080, 1920))
-        )
-        clip = clip.resized(lambda t: 1 + 0.1 * (t / (slide_dur + overlap)))
-        if i > 0:
-            clip = clip.with_effects([vfx.FadeIn(overlap)])
-        clips.append(clip)
-
-    final_video = concatenate_videoclips(clips, method="compose", padding=-overlap)
-    final_video = final_video.with_audio(audio).subclipped(0, total_dur)
-
-    print(f"[ENGINE] 🎬 Rendering: {total_dur:.2f}s", flush=True)
-    final_video.write_videofile(
-        output_path, fps=30, codec="libx264", audio_codec="aac",
-        bitrate="6000k", preset="medium", threads=4, logger=None,
-    )
-    final_video.close()
-    audio.close()
-
-
-def create_reel(image_paths, audio_path: str, use_moviepy: bool = False) -> str:
-    output_path    = os.path.join(DATA_DIR, "reel.mp4")
-    slide_duration = 5
-
-    if isinstance(image_paths, str):
-        image_paths = [image_paths]
-
-    if use_moviepy:
-        _moviepy_reel(image_paths, audio_path, output_path)
-        return output_path
-
-    print("[ENGINE] Building reel with FFmpeg...", flush=True)
-    try:
-        if len(image_paths) == 1:
-            video_input  = ffmpeg.input(image_paths[0], loop=1, t=40, framerate=30)
-            video_scaled = (
-                video_input
-                .filter("scale", 1080, 1920, force_original_aspect_ratio="decrease")
-                .filter("pad",   1080, 1920, "(ow-iw)/2", "(oh-ih)/2", color="black")
-                .filter("setsar", "1/1")
-            )
-        else:
-            segments = []
-            for path in image_paths:
-                seg = (
-                    ffmpeg.input(path, loop=1, t=slide_duration, framerate=30)
-                    .filter("scale", 1080, 1920, force_original_aspect_ratio="decrease")
-                    .filter("pad",   1080, 1920, "(ow-iw)/2", "(oh-ih)/2", color="black")
-                    .filter("setsar", "1/1")
-                    .filter("fade", type="in",  start_time=0, duration=0.4)
-                    .filter("fade", type="out", start_time=slide_duration - 0.4, duration=0.4)
-                )
-                segments.append(seg)
-            video_scaled = ffmpeg.concat(*segments, v=1, a=0)
-
-        audio_input = ffmpeg.input(audio_path)
-        out = ffmpeg.output(
-            video_scaled, audio_input, output_path,
-            vcodec="libx264", acodec="aac", pix_fmt="yuv420p",
-            movflags="+faststart", r=30,
-            video_bitrate="5000k", audio_bitrate="192k",
-            shortest=None, **{"threads": "4", "preset": "fast"},
-        )
-        ffmpeg.run(out, overwrite_output=True, quiet=False)
-        print(f"[ENGINE] ✅ FFmpeg reel: {output_path}", flush=True)
-        return output_path
-    except ffmpeg.Error as e:
-        print(f"[ENGINE] ❌ FFmpeg error: {e.stderr.decode()}", flush=True)
-        raise
-
-
-# ─────────────────────────────────────────────────────────────
-# MASTER PIPELINE
-# ─────────────────────────────────────────────────────────────
-async def run_engine(theme: str) -> dict:
-    is_sports  = is_sports_theme(theme)
-    sport_data = parse_sports_theme(theme) if is_sports else {}
-
-    content = await generate_content(theme)
-
-    if is_sports:
-        from app.image_assembler import assemble_sports_slides
-        all_articles = fetch_all_sports_news(max_age_hours=24)
-
-        print(f"[ENGINE] 🎙️ Generating voice + slides in parallel...", flush=True)
-        image_paths, audio_path = await asyncio.gather(
-            assemble_sports_slides(sport_data, all_articles),
-            generate_voice(content["voice_script"], is_sports=True),
-        )
-        video_path = create_reel(image_paths, audio_path, use_moviepy=True)
-
-    else:
-        image_paths, audio_path = await asyncio.gather(
-            generate_slideshow_images(theme, count=8),
-            generate_voice(content["voice_script"], is_sports=False),
-        )
-        video_path = create_reel(image_paths, audio_path, use_moviepy=False)
-
-    return {"video_path": video_path, "caption": content["caption"]}
