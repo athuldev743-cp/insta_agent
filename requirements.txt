@@ -1,15 +1,26 @@
+# --- Web Server & API ---
 fastapi
 uvicorn
-openai
-edge-tts
-ffmpeg-python
-cloudinary
 requests
 python-dotenv
+qstash
+
+# --- Scheduling & Logic ---
 apscheduler
-huggingface_hub
-Pillow
-moviepy==2.1.1
 feedparser==6.0.11
 numpy
-qstash
+
+# --- AI Content (Script & Voice) ---
+openai
+edge-tts
+
+# --- Image Processing & Upscaling ---
+Pillow
+
+# --- Video Rendering ---
+moviepy==2.1.1
+ffmpeg-python
+
+# --- Cloud Storage & Fallbacks ---
+cloudinary
+huggingface_hub

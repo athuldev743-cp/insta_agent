@@ -1,54 +1,49 @@
 # app/config.py
 # =====================================================
-# AGENT CONFIGURATION v4 - SPORTS ONLY
-# Posts per day: 3 (Sports News Cycle)
-#   - 9AM  → Morning News Wrap
-#   - 2PM  → Afternoon Sports Story
-#   - 8PM  → Evening Prime Story
-# + Real-time match watcher every 15 mins
+# AGENT CONFIGURATION v4.1 - IPL & WEB-SCRAPE ONLY
+# Posts per day: 3 (Strict IPL Cycle)
+#   - 9AM  → Morning News Wrap (Match Review)
+#   - 2PM  → Afternoon Lineups (Match Preview)
+#   - 9PM  → Evening Prime (Match Result/Live)
+# + Real-time match watcher every 20 mins
 # =====================================================
 
 AGENT_CONFIG = {
 
     # ── ACCOUNT IDENTITY ──────────────────────────────
-    "account_niche": "Sports News",
+    "account_niche": "IPL & Indian Sports News",
 
     "account_description": (
-        "Covers the most important sports news of the day — "
-        "cricket, football, and more — curated for an Indian audience."
+        "Real-time IPL 2026 coverage, Indian Cricket updates, and "
+        "major sports news curated for the ultimate Indian fan."
     ),
 
-    "target_audience": (
-        "Sports fans across India, especially cricket and ISL followers."
-    ),
+    "target_audience": "Indian Sports Fans, IPL Lovers, Cricket Enthusiasts.",
 
-    "brand_voice": (
-        "Authoritative, high-energy, and professional — like a "
-        "TV news broadcaster. Direct, factual, and exciting."
-    ),
+    "brand_voice": "High-energy, authoritative, and fast-paced TV sports anchor style.",
 
-    # ── POSTING SCHEDULE ──────────────────────────────
+    # ── POSTING SCHEDULE (IPL OPTIMISED) ──────────────
     "post_times": [
         {
-            "label":        "morning_sports",
+            "label":        "morning_wrap",
             "hour":         9,
             "minute":       0,
             "content_type": "sports",
             "story_slot":   1, 
         },
         {
-            "label":        "afternoon_sports",
+            "label":        "noon_lineups",
             "hour":         14,
             "minute":       0,
             "content_type": "sports",
-            "story_slot":   2, 
+            "story_slot":   1, 
         },
         {
-            "label":        "evening_sports",
-            "hour":         20,
+            "label":        "night_results",
+            "hour":         21,
             "minute":       0,
             "content_type": "sports",
-            "story_slot":   3, 
+            "story_slot":   1, 
         },
     ],
     "timezone": "Asia/Kolkata",
@@ -57,16 +52,10 @@ AGENT_CONFIG = {
     "sport_seasons": {
         1:  {"cricket": 5, "football": 6}, 
         2:  {"cricket": 5, "football": 6}, 
-        3:  {"cricket": 4, "football": 7}, 
-        4:  {"cricket": 1, "football": 8},   # Apr: IPL Peak 🔥
-        5:  {"cricket": 1, "football": 8},   # May: IPL Peak 🔥
-        6:  {"cricket": 3, "football": 7}, 
-        7:  {"cricket": 3, "football": 7}, 
-        8:  {"cricket": 4, "football": 6}, 
-        9:  {"cricket": 4, "football": 5}, 
-        10: {"cricket": 5, "football": 3},   # Oct: ISL starts
-        11: {"cricket": 5, "football": 2}, 
-        12: {"cricket": 5, "football": 2}, 
+        3:  {"cricket": 2, "football": 7}, # IPL Warmup
+        4:  {"cricket": 1, "football": 8}, # IPL Peak 🔥
+        5:  {"cricket": 1, "football": 8}, # IPL Peak 🔥
+        10: {"cricket": 5, "football": 3}, # ISL starts
     },
 
     # ══════════════════════════════════════════════════
@@ -74,94 +63,61 @@ AGENT_CONFIG = {
     # ══════════════════════════════════════════════════
     "sports": {
 
-        "max_news_age_hours":               24,
-        "cooldown_hours":                   3,
-        "realtime_check_interval_minutes":  15,
-        "realtime_score_threshold":         65,
+        "max_news_age_hours":           18, # Keeping it fresher for IPL
+        "cooldown_hours":               3,
+        "realtime_check_interval_minutes": 20,
+        "realtime_score_threshold":     70,
 
         "india_keywords": [
-            "india", "indian", "bcci", "ipl", "team india",
-            "virat", "kohli", "rohit", "sharma", "bumrah",
-            "hardik", "pandya", "dhoni", "shubman", "gill",
-            "isl", "indian super league", "chennaiyin", "mohun bagan",
-            "mumbai city", "bengaluru fc", "kerala blasters",
-            "champions trophy", "asia cup", "t20 world cup",
+            "india", "indian", "bcci", "ipl", "ipl 2026", "team india",
+            "virat", "kohli", "rohit", "sharma", "dhoni", "csk", "rcb", "mi",
+            "hardik", "gt", "kkr", "srh", "lsg", "rr", "dc", "pbks",
+            "probable xi", "playing 11", "toss update", "match result",
+            "isl", "kerala blasters", "champions trophy",
         ],
 
         "caption_style": {
-            "tone":           "Breaking news — urgent, factual, exciting",
+            "tone":           "IPL Buzz — high energy, emojis, urgent",
             "length":         "short",
             "use_emojis":     True,
-            "emoji_count":    "3-4",
-            "call_to_action": True,
+            "emoji_count":    "4-5",
             "cta_examples": [
-                "Follow for live sports updates! 🔴",
-                "Save this post! 🔖",
-                "Tag a fan! 🏆",
-                "Comment your reaction! 👇",
-                "Share the news! 📢",
+                "Follow for LIVE IPL scores! 🏏",
+                "Who will win tonight? Comment below! 👇",
+                "Share this with a cricket fan! 📢",
+                "Team India at its best! 🏆",
             ]
         },
 
         "hashtags": {
-            "count": 15,
-            "fixed": [
-                "#Cricket", "#IndianSports", "#SportNews",
-                "#BreakingNews", "#SportsUpdate",
-            ],
+            "count": 20,
+            "fixed": ["#IPL2026", "#CricketIndia", "#TeamIndia", "#SportsNews"],
             "variable": [
-                "#ICC", "#BCCI", "#IPL", "#IPL2025",
-                "#T20", "#T20WorldCup", "#ChampionsTrophy",
-                "#TeamIndia", "#IndianCricketTeam",
-                "#ISL", "#IndianSuperLeague", "#KeralaBlasters",
-                "#UEFA", "#FIFA", "#PremierLeague",
-                "#MatchDay", "#CricketFans", "#FootballFans",
-                "#LiveCricket", "#CricketHighlights",
-                "#SportsFan", "#Football",
+                "#CSK", "#RCB", "#MumbaiIndians", "#ViratKohli", "#MSDhoni",
+                "#IPLHighlights", "#MatchDay", "#CricketStatus", "#MalayalamSports",
+                "#IPLNews", "#CricketFans", "#T20Cricket"
             ]
         },
 
-        "image_style": {
-            "aesthetic": "professional sports broadcast graphic, breaking news style",
-            "colors":    "deep navy background, bold gold and white text, red breaking-news accent bar",
-            "mood":      "urgent, high-energy, professional broadcast",
-            "elements": (
-                "bold headline text centered, "
-                "score or key stat highlighted in large font, "
-                "clean modern sans-serif typography, "
-                "subtle stadium crowd blur in background, "
-                "thin red ticker bar at bottom with source name, "
-                "no real people faces, no club/board logos, no copyrighted imagery"
-            )
-        },
-
+        # ── NO-AI CAROUSEL PLAN ───────────────────────
         "carousel": {
             "total_slides": 8,
             "slide_plan": [
-                {"slot": 1, "role": "headline_card",  "type": "generated",  "desc": "Breaking news headline with score/result"},
-                {"slot": 2, "role": "main_photo",     "type": "scraped",    "desc": "Main match photo from primary source"},
-                {"slot": 3, "role": "action_photo",   "type": "scraped",    "desc": "Action photo from secondary source"},
-                {"slot": 4, "role": "reaction_photo", "type": "scraped",    "desc": "Celebration/reaction photo from third source"},
-                {"slot": 5, "role": "context_photo",  "type": "scraped",    "desc": "Pre-match or squad photo from fourth source"},
-                {"slot": 6, "role": "key_stat_1",     "type": "stat_card",  "desc": "Top player performance stat"},
-                {"slot": 7, "role": "key_stat_2",     "type": "stat_card",  "desc": "Match summary / result card"},
-                {"slot": 8, "role": "outro_card",     "type": "generated",  "desc": "Follow us CTA card with branding"},
+                {"slot": 1, "role": "headline_card",  "type": "scraped_branded", "desc": "News headline on real match photo"},
+                {"slot": 2, "role": "match_action",   "type": "scraped",         "desc": "Action photo 1"},
+                {"slot": 3, "role": "match_action",   "type": "scraped",         "desc": "Action photo 2"},
+                {"slot": 4, "role": "match_action",   "type": "scraped",         "desc": "Action photo 3"},
+                {"slot": 5, "role": "match_action",   "type": "scraped",         "desc": "Action photo 4"},
+                {"slot": 6, "role": "key_stat_1",     "type": "stat_card",      "desc": "Key player/match stat card"},
+                {"slot": 7, "role": "key_stat_2",     "type": "stat_card",      "desc": "Result / Standings card"},
+                {"slot": 8, "role": "outro_card",     "type": "scraped_branded", "desc": "Branded follow CTA card"},
             ],
-            "image_fallback_order": ["scrape", "nvidia", "huggingface"],
         },
 
         "voice": {
             "tts_voice": "ml-IN-MidhunNeural",
-            "script_style": (
-                "Professional Malayalam news anchor / sports news reader. "
-                "Authoritative, clear, and fast-paced like a TV news broadcast. "
-                "Structure: [Opening hook] → [What happened] → [Key stats/score] → [Significance for India] → [Closing line]."
-            ),
-            "script_length":  "55-65 seconds",
-            "script_example": (
-                "ഇന്ത്യ ഓസ്‌ട്രേലിയയെ 6 വിക്കറ്റിന് തോൽപ്പിച്ചു. "
-                "Rohit Sharma-യുടെ നേതൃത്വത്തിൽ Team India Champions Trophy final ജയിച്ചു."
-            ),
+            "script_style": "Fast-paced TV News Anchor. Clear and exciting Malayalam.",
+            "script_length":  "55-60 seconds",
         }
     },
 }

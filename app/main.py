@@ -1,3 +1,11 @@
+# main.py
+# =====================================================
+# INSTAGRAM SPORTS AI AGENT v4 — IPL SCHEDULE EDITION
+# + Strict 9 AM, 2 PM, 9 PM IST Slots
+# + Match-Aware Logic (Noon Previews vs. Night Results)
+# + No AI Image Dependencies
+# =====================================================
+
 import asyncio
 import os
 import sys
@@ -28,7 +36,7 @@ from app.sports_fetcher import (
     ALL_FEEDS,
 )
 
-# QStash is optional — only used if keys are present
+# QStash is optional
 try:
     from qstash import Receiver
     _qstash_receiver = Receiver(
@@ -46,7 +54,6 @@ scheduler = BackgroundScheduler(timezone=AGENT_CONFIG["timezone"])
 
 TZ = ZoneInfo(AGENT_CONFIG["timezone"])
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 #  JOB STATE
 # ═══════════════════════════════════════════════════════════════════════════
@@ -60,7 +67,6 @@ JOB_STATE = {
     "last_theme": None,
     "last_score": None,
 }
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  CORE CYCLE
@@ -98,7 +104,6 @@ def run_post_cycle_sync(
         JOB_STATE["running"] = False
         loop.close()
 
-
 async def run_post_cycle(
     theme: str | None = None,
     story_slot: int = 1,
@@ -106,17 +111,21 @@ async def run_post_cycle(
 ):
     """Fetch news → generate video → post to Instagram."""
 
-    # ── 1. Resolve theme ──────────────────────────────────────────────────
+    # ── 1. Resolve theme (IPL Match Aware) ────────────────────────────────
     if theme:
         resolved_theme = theme
     else:
+        # If it's the 9 PM slot or Real-time, we prefer Match Results
+        current_hour = datetime.now(TZ).hour
+        is_night_slot = (current_hour >= 20 or current_hour <= 1)
+        
         article = get_top_sports_story(
-            prefer_match_end=is_realtime,
+            prefer_match_end=(is_realtime or is_night_slot),
             story_slot=story_slot,
         )
+        
         if not article:
-            mode = "realtime match-end" if is_realtime else f"slot {story_slot}"
-            print(f"[AGENT] ℹ️  No fresh story ({mode}) — standing by.", flush=True)
+            print(f"[AGENT] ℹ️ No fresh IPL story found right now. Standing by.", flush=True)
             return
 
         resolved_theme          = build_sports_theme(article)
@@ -126,17 +135,16 @@ async def run_post_cycle(
     JOB_STATE["last_theme"] = resolved_theme
     JOB_STATE["last_type"]  = "realtime_sports" if is_realtime else "sports"
 
-    # ── 2. Engine + post ──────────────────────────────────────────────────
-    print(f"[AGENT] 🚀 Engine: {resolved_theme[:80]}", flush=True)
+    # ── 2. Engine (8-Slot Web Scrape) + Post ─────────────────────────────
+    print(f"[AGENT] 🚀 Engine Starting: {resolved_theme[:80]}", flush=True)
     result = await run_engine(resolved_theme)
 
-    print("[AGENT] 📲 Posting to Instagram...", flush=True)
+    print("[AGENT] 📲 Posting Reel to Instagram...", flush=True)
     post_id = post_reel_full_pipeline(
         video_path=result["video_path"],
         caption=result["caption"],
     )
-    print(f"[AGENT] ✅ Posted! ID: {post_id}", flush=True)
-
+    print(f"[AGENT] ✅ POST SUCCESS! ID: {post_id}", flush=True)
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  KEEP-ALIVE
@@ -148,11 +156,10 @@ def keep_alive_ping():
         req.get(f"{url}/health", timeout=10)
         print("[AGENT] 💓 Keep-alive ping", flush=True)
     except Exception as e:
-        print(f"[AGENT] ⚠️  Keep-alive failed: {e}", flush=True)
-
+        print(f"[AGENT] ⚠️ Keep-alive failed: {e}", flush=True)
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  STARTUP
+#  STARTUP & IPL SCHEDULER
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.on_event("startup")
@@ -160,61 +167,54 @@ async def startup():
     auto_refresh_if_needed()
 
     if scheduler.running:
-        print("[AGENT] Scheduler already running", flush=True)
         return
 
-    tz_name    = AGENT_CONFIG["timezone"]
-    post_times = AGENT_CONFIG["post_times"]
+    tz_name = AGENT_CONFIG["timezone"]
 
-    # ── Scheduled post slots ───────────────────────────────────────────────
-    for pt in post_times:
-        slot = pt.get("story_slot", 1)
+    # ── IPL SHIFT SCHEDULE (9 AM, 2 PM, 9 PM IST) ────────────────────────
+    ipl_schedule = [
+        {"hour": 9,  "minute": 0,  "label": "Morning_Review", "slot": 1}, # Last night review
+        {"hour": 14, "minute": 0,  "label": "Noon_Lineups",   "slot": 1}, # Today's match preview
+        {"hour": 21, "minute": 0,  "label": "Night_Results",  "slot": 1}, # Mid/End match update
+    ]
+
+    for pt in ipl_schedule:
         scheduler.add_job(
             run_post_cycle_sync,
-            # ← KEY FIX: pass timezone so AWS UTC doesn't shift your IST schedule
             CronTrigger(hour=pt["hour"], minute=pt["minute"], timezone=tz_name),
-            kwargs={"story_slot": slot},
+            kwargs={"story_slot": pt["slot"]},
             id=pt["label"],
-            name=f"[sports slot={slot}] {pt['hour']:02d}:{pt['minute']:02d} IST",
+            name=f"IPL {pt['label']} Slot",
             replace_existing=True,
             max_instances=1,
             coalesce=True,
             misfire_grace_time=1800,
         )
-        print(
-            f"[AGENT] ✅ Scheduled: {pt['label']} at "
-            f"{pt['hour']:02d}:{pt['minute']:02d} {tz_name}",
-            flush=True,
-        )
+        print(f"[AGENT] ✅ IPL Scheduled: {pt['label']} at {pt['hour']:02d}:{pt['minute']:02d} IST", flush=True)
 
-    # ── Real-time match watcher every 15 mins ─────────────────────────────
+    # ── Real-time match watcher every 20 mins ─────────────────────────────
+    # Increased to 20 mins to save memory during heavy IPL traffic
     scheduler.add_job(
         run_post_cycle_sync,
-        IntervalTrigger(minutes=15, timezone=tz_name),
+        IntervalTrigger(minutes=20, timezone=tz_name),
         kwargs={"is_realtime": True},
         id="watcher",
-        name="Real-Time Match Watcher",
+        name="Real-Time IPL Watcher",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
-        misfire_grace_time=300,
     )
-    print("[AGENT] ✅ Real-time watcher: every 15 mins", flush=True)
 
-    # ── Keep-alive ping every 14 mins ─────────────────────────────────────
+    # ── Keep-alive ping ──────────────────────────────────────────────────
     scheduler.add_job(
         keep_alive_ping,
         CronTrigger(minute="*/14", timezone=tz_name),
         id="keep_alive",
-        name="Keep Alive",
-        replace_existing=True,
     )
 
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown())
-
-    print(f"[AGENT] ⚽ Sports Agent v4 Live | {len(ALL_FEEDS)} feeds | {len(post_times)} slots", flush=True)
-
+    print(f"[AGENT] 🏏 IPL Agent v4.1 Live | {tz_name} | 3-Post Cycle Active", flush=True)
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  ROUTES
@@ -223,216 +223,35 @@ async def startup():
 @app.api_route("/", methods=["GET", "HEAD"])
 async def root(request: Request):
     return {
-        "service":          "Instagram Sports AI Agent",
-        "version":          "4.0.0",
-        "status":           "running",
-        "endpoints": {
-            "/health":          "Health check + scheduler status",
-            "/sports-preview":  "Preview next sports story",
-            "/scores-preview":  "Top 10 scored articles",
-            "/schedule-status": "All scheduled jobs",
-            "/job-status":      "Current job state",
-            "/post-now":        "Trigger immediate post (POST)",
-            "/schedule-test":   "Schedule test post (POST)",
-            "/run-engine":      "QStash-secured engine trigger (POST)",
-        },
-        "feeds_active":     len(ALL_FEEDS),
-        "scheduler_running": scheduler.running,
-        "last_run":         JOB_STATE.get("last_end"),
-        "current_state":    JOB_STATE.get("running", False),
+        "service": "IPL Instagram Agent",
+        "status": "running",
+        "schedule": "9:00, 14:00, 21:00 IST",
+        "last_run": JOB_STATE.get("last_end"),
     }
-
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health(request: Request):
     return {
         "status": "healthy",
-        "scheduler": {
-            "running":     scheduler.running,
-            "jobs":        len(scheduler.get_jobs()),
-            "job_details": [
-                {
-                    "id":       job.id,
-                    "name":     job.name,
-                    "next_run": str(job.next_run_time) if job.next_run_time else None,
-                }
-                for job in scheduler.get_jobs()
-            ],
-        },
-        "env_checks": {
-            "instagram_token": bool(os.getenv("INSTAGRAM_ACCESS_TOKEN")),
-            "openrouter_key":  bool(os.getenv("OPENROUTER_API_KEY")),
-            "hf_key":          bool(os.getenv("HF_API_KEY")),
-            "nvidia_key":      bool(os.getenv("NVIDIA_API_KEY")),
-            "cloudinary":      bool(os.getenv("CLOUDINARY_CLOUD_NAME")),
-        },
+        "jobs_active": len(scheduler.get_jobs()),
         "agent_state": JOB_STATE,
-        "timestamp":   datetime.now(TZ).isoformat(),
+        "timestamp": datetime.now(TZ).isoformat(),
     }
-
-
-@app.get("/time-now")
-async def time_now():
-    return {
-        "timezone": AGENT_CONFIG["timezone"],
-        "now_ist":  datetime.now(TZ).isoformat(),
-        "now_utc":  datetime.utcnow().isoformat() + "Z",
-    }
-
-
-@app.get("/job-status")
-async def job_status():
-    return JOB_STATE
-
-
-@app.get("/schedule-status")
-async def schedule_status():
-    jobs = [
-        {
-            "id":       j.id,
-            "name":     j.name,
-            "next_run": str(j.next_run_time),
-        }
-        for j in scheduler.get_jobs()
-    ]
-    return {
-        "status":       "running" if scheduler.running else "stopped",
-        "timezone":     AGENT_CONFIG["timezone"],
-        "scheduled":    jobs,
-        "rss_feeds":    len(ALL_FEEDS),
-    }
-
 
 @app.get("/sports-preview")
 async def sports_preview(story_slot: int = 1, match_end_only: bool = False):
-    """Preview what the next sports post would pick — no posting."""
-    article = get_top_sports_story(
-        prefer_match_end=match_end_only,
-        story_slot=story_slot,
-    )
-    if not article:
-        return {
-            "status":  "no_news",
-            "message": "No qualifying story found (or all on cooldown).",
-        }
+    article = get_top_sports_story(prefer_match_end=match_end_only, story_slot=story_slot)
+    if not article: return {"status": "no_news"}
     return {
-        "status":          "found",
-        "story_slot":      story_slot,
-        "relevance_score": article.get("relevance_score", 0),
-        "title":           article["title"],
-        "summary":         article.get("summary", "")[:300],
-        "source":          article["source"],
-        "category":        article["category"],
-        "region":          article.get("region", ""),
-        "is_match_end":    article.get("is_match_end", False),
-        "pub_date":        str(article.get("pub_date", "")),
-        "image_url":       article.get("image_url", ""),
-        "url":             article["url"],
+        "title": article["title"],
+        "score": article.get("relevance_score", 0),
+        "source": article["source"],
+        "is_match_end": article.get("is_match_end", False),
+        "img": article.get("image_url", "")
     }
-
-
-@app.get("/scores-preview")
-async def scores_preview():
-    """Top 10 scored articles right now — for debugging the scorer."""
-    articles = fetch_all_sports_news(max_age_hours=24)
-    return {
-        "total_fetched": len(articles),
-        "top_10": [
-            {
-                "rank":         i + 1,
-                "score":        a.get("relevance_score", 0),
-                "title":        a["title"][:80],
-                "source":       a["source"],
-                "category":     a["category"],
-                "region":       a.get("region", ""),
-                "is_match_end": a.get("is_match_end", False),
-                "pub_date":     str(a.get("pub_date", "")),
-            }
-            for i, a in enumerate(articles[:10])
-        ],
-    }
-
 
 @app.api_route("/post-now", methods=["GET", "POST"])
-async def post_now(
-    background_tasks: BackgroundTasks,
-    story_slot: int = 1,
-    theme: str | None = None,
-):
-    """Trigger an immediate post. Accessible via GET or POST for easy browser testing."""
-    if JOB_STATE["running"]:
-        return {"status": "busy", "message": "A job is already running."}
-
-    background_tasks.add_task(
-        run_post_cycle_sync,
-        theme=theme,
-        story_slot=story_slot,
-        is_realtime=False,
-    )
-    return {
-        "status":     "accepted",
-        "story_slot": story_slot,
-        "theme":      theme or "auto",
-        "message":    "Post starting in background — poll /job-status to track.",
-    }
-
-
-@app.api_route("/schedule-test", methods=["GET", "POST"])
-async def schedule_test(
-    background_tasks: BackgroundTasks,
-    minutes: int = 1,
-    story_slot: int = 1,
-    theme: str | None = None,
-):
-    """Schedule a one-off test post N minutes from now."""
-    tz     = TZ
-    run_at = datetime.now(tz) + timedelta(minutes=minutes)
-    job_id = f"test_{int(run_at.timestamp())}"
-
-    scheduler.add_job(
-        run_post_cycle_sync,
-        trigger="date",
-        run_date=run_at,
-        id=job_id,
-        name=f"TEST slot={story_slot} at {run_at.strftime('%H:%M')} IST",
-        replace_existing=True,
-        kwargs={"theme": theme, "story_slot": story_slot},
-    )
-    return {
-        "status":     "scheduled",
-        "job_id":     job_id,
-        "run_at_ist": run_at.isoformat(),
-        "story_slot": story_slot,
-        "theme":      theme or "auto",
-    }
-
-
-@app.post("/run-engine")
-async def trigger_engine(request: Request, background_tasks: BackgroundTasks):
-    """
-    QStash-secured endpoint for automated triggers.
-    Signature verification only enforced when QSTASH keys are set.
-    """
-    body_bytes = await request.body()
-    body_str   = body_bytes.decode("utf-8")
-    signature  = request.headers.get("upstash-signature", "")
-
-    use_qstash = bool(
-        os.getenv("QSTASH_CURRENT_SIGNING_KEY")
-        and os.getenv("QSTASH_NEXT_SIGNING_KEY")
-        and _qstash_receiver
-    )
-
-    if use_qstash:
-        if not signature:
-            raise HTTPException(status_code=401, detail="Missing QStash signature")
-        try:
-            _qstash_receiver.verify(body=body_str, signature=signature)
-        except Exception as e:
-            print(f"[SECURITY] QStash verification failed: {e}", flush=True)
-            raise HTTPException(status_code=401, detail="Invalid signature")
-    else:
-        print("[DEBUG] QStash verification skipped (keys not configured)", flush=True)
-
-    background_tasks.add_task(run_post_cycle_sync, story_slot=1)
-    return {"status": "accepted", "message": "Engine starting in background."}
+async def post_now(background_tasks: BackgroundTasks, story_slot: int = 1):
+    if JOB_STATE["running"]: return {"status": "busy"}
+    background_tasks.add_task(run_post_cycle_sync, story_slot=story_slot)
+    return {"status": "started"}
